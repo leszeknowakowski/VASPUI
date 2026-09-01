@@ -60,6 +60,11 @@ class StructureControlsWidget(QWidget):
         self.vlayout = None
         self.mag_actor = None
         self.plane_height_range_slider = None
+        self.plane_transparency_slider = None
+        self.plane_transparency_label = None
+        self.plane_opacity = 1.0
+        self.top_plane_cb = None
+        self.bottom_plane_cb = None
         self.geometry_value_label = None
         self.geometry_slider = None
         self.constrains_all_cb = None
@@ -327,17 +332,17 @@ class StructureControlsWidget(QWidget):
 
     def planes_layout(self):
         """widgets to control cutoff planes posistion and color"""
-        top_plane_cb = QtWidgets.QCheckBox()
-        top_plane_cb.setChecked(False)
-        top_plane_cb.setText('top plane')
+        self.top_plane_cb = QtWidgets.QCheckBox()
+        self.top_plane_cb.setChecked(False)
+        self.top_plane_cb.setText('top plane')
 
-        top_plane_cb.stateChanged.connect(self.toggle_plane_heigher)
+        self.top_plane_cb.stateChanged.connect(self.toggle_plane_heigher)
 
-        bottom_plane_cb = QtWidgets.QCheckBox()
-        bottom_plane_cb.setChecked(True)
-        bottom_plane_cb.setText('bottom plane')
+        self.bottom_plane_cb = QtWidgets.QCheckBox()
+        self.bottom_plane_cb.setChecked(True)
+        self.bottom_plane_cb.setText('bottom plane')
 
-        bottom_plane_cb.stateChanged.connect(self.toggle_plane)
+        self.bottom_plane_cb.stateChanged.connect(self.toggle_plane)
         z = self.structure_plot_widget.data.z
 
         # setRange -> aktualny, teraźniejszy zares slidera
@@ -371,15 +376,30 @@ class StructureControlsWidget(QWidget):
         self.plane_color_button.setColor(np.array([0.890, 0.8119, 0.341])*255)
         self.plane_color_button.sigColorChanging.connect(self.change_plane_color)
 
+        self.plane_transparency_label = QtWidgets.QLabel("Transparency: 0%")
+        self.plane_transparency_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.plane_transparency_slider.setRange(0, 100)
+        self.plane_transparency_slider.setValue(0)
+        self.plane_transparency_slider.setToolTip(
+            "Adjust the transparency of both cut-off planes"
+        )
+        self.plane_transparency_slider.valueChanged.connect(
+            self.change_plane_transparency
+        )
+
         planes_layout = QtWidgets.QHBoxLayout()
-        planes_layout.addWidget(top_plane_cb)
-        planes_layout.addWidget(bottom_plane_cb)
+        planes_layout.addWidget(self.top_plane_cb)
+        planes_layout.addWidget(self.bottom_plane_cb)
 
         planes_layout.addWidget(plane_color_label)
         planes_layout.addWidget(self.plane_color_button)
 
         self.planes_frame_layout.addLayout(planes_layout)
         self.planes_frame_layout.addWidget(self.plane_height_range_slider)
+        transparency_layout = QtWidgets.QHBoxLayout()
+        transparency_layout.addWidget(self.plane_transparency_label)
+        transparency_layout.addWidget(self.plane_transparency_slider, stretch=1)
+        self.planes_frame_layout.addLayout(transparency_layout)
         self.vlayout.addWidget(self.planes_frame)
 
     def energy_plot_layout(self):
@@ -822,13 +842,29 @@ class StructureControlsWidget(QWidget):
         self.structure_plot_widget.plane_actor.GetProperty().SetColor((r,g,b))
         self.structure_plot_widget.plane_actor_heigher.GetProperty().SetColor((r,g,b))
 
+    def change_plane_transparency(self, value):
+        """Set a shared transparency for both cut-off planes."""
+        self.plane_opacity = 1.0 - value / 100.0
+        self.plane_transparency_label.setText(f"Transparency: {value}%")
+        self.structure_plot_widget.plane_actor.GetProperty().SetOpacity(
+            self.plane_opacity if self.bottom_plane_cb.isChecked() else 0.0
+        )
+        self.structure_plot_widget.plane_actor_heigher.GetProperty().SetOpacity(
+            self.plane_opacity if self.top_plane_cb.isChecked() else 0.0
+        )
+        self.structure_plot_widget.plotter.renderer.Render()
+
     def toggle_plane(self, flag):
         """ switches on and off plane visibility"""
-        self.structure_plot_widget.plane_actor.GetProperty().SetOpacity(flag)
+        opacity = self.plane_opacity if flag else 0.0
+        self.structure_plot_widget.plane_actor.GetProperty().SetOpacity(opacity)
+        self.structure_plot_widget.plotter.renderer.Render()
 
     def toggle_plane_heigher(self, flag):
         """ switches on and off plane visibility"""
-        self.structure_plot_widget.plane_actor_heigher.GetProperty().SetOpacity(flag)
+        opacity = self.plane_opacity if flag else 0.0
+        self.structure_plot_widget.plane_actor_heigher.GetProperty().SetOpacity(opacity)
+        self.structure_plot_widget.plotter.renderer.Render()
 
     def toggle_all_constrains(self, flag):
         """ switches on and off constrains visibility"""
