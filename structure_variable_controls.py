@@ -7,7 +7,7 @@ import  os
 from PyQt5.QtWidgets import QApplication, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, \
     QPushButton, QHBoxLayout, QHeaderView, QFileDialog, QAbstractItemView, QLabel, QLineEdit, QCheckBox, \
      QDialogButtonBox, QSlider, QGroupBox, QMessageBox, QAbstractScrollArea, QSizePolicy, QMenu, QAction
-from PyQt5.QtCore import pyqtSlot, Qt, pyqtSignal, QItemSelectionModel, QItemSelection, QVariant, QPoint, QEvent
+from PyQt5.QtCore import pyqtSlot, Qt, pyqtSignal, QItemSelectionModel, QItemSelection, QVariant, QPoint, QEvent, QTimer
 import traceback
 from periodic_table import PeriodicTable
 from itertools import groupby, combinations
@@ -18,6 +18,7 @@ from ase.constraints import FixBondLength, FixLinearTriatomic
 from config import AppConfig
 AppConfig.load()
 from vtk import vtkNamedColors,  vtkActor, vtkPoints, vtkCellArray, vtkLine, vtkPolyData, vtkPolyDataMapper
+from perf_timing import timed
 
 toc = time.perf_counter()
 print(f'importing in structure variable controls: {toc - tic:0.4f}')
@@ -238,6 +239,12 @@ class StructureVariableControls(QWidget):
     atom_deleted = pyqtSignal(int)
     all_atoms_deleted = pyqtSignal(str)
     selected_actors_signal = pyqtSignal(list)
+    UPDATE_ATOMS = 1 << 0
+    UPDATE_TABLE = 1 << 1
+    UPDATE_TABLE_FULL = 1 << 2
+    UPDATE_BONDS = 1 << 3
+    UPDATE_BOND_LABELS = 1 << 4
+    UPDATE_STATUS = 1 << 5
 
     def __init__(self, structure_control_widget, parent=None):
         super().__init__(structure_control_widget)
@@ -254,6 +261,7 @@ class StructureVariableControls(QWidget):
 
         # Initialize table and populate
         self.create_table()
+        self.structure_control_widget.structure_plot_widget.plotter.add_key_event('Delete', self.delete_atoms)
 
         # add first row buttons layout
         self.btns_layout = QHBoxLayout()
@@ -350,14 +358,19 @@ class StructureVariableControls(QWidget):
         self.structure_control_widget.selected_actors_changed.connect(lambda: self.rectangle_rows_selection(rows=None))
         self.structure_control_widget.geometry_slider.valueChanged.connect(self.update_bonds)
         self.structure_control_widget.geometry_slider.valueChanged.connect(self.change_table_when_atom_added)
-        self.structure_control_widget.geometry_slider.valueChanged.connect(self.tableWidget.update_all_data)
         self.movement_slider_value = 50
         self.rattle_magnitude_value = 10
         self.selected_atom_drag_active = False
         self.selected_atom_drag_last_pos = None
         self.selected_atom_drag_moved = False
+        self.deferred_structure_update_flags = 0
+        self.structure_update_delay_ms = 00
+        self.structure_update_timer = QTimer(self)
+        self.structure_update_timer.setSingleShot(True)
+        self.structure_update_timer.timeout.connect(self.flush_deferred_structure_updates)
         self.structure_control_widget.structure_plot_widget.plotter.interactor.installEventFilter(self)
 
+    @timed()
     def create_table(self):
         self.tableWidget = TableWidgetDragRows(self)
         self.tableWidget.setSelectionBehavior(QTableWidget.SelectRows)
@@ -409,8 +422,6 @@ class StructureVariableControls(QWidget):
         # Connect the cellChanged signal to the updateData method
         self.tableWidget.cellChanged.connect(self.updateData)
         self.tableWidget.itemSelectionChanged.connect(self.on_selection_changed)
-        self.structure_control_widget.structure_plot_widget.plotter.add_key_event('Delete', self.delete_atoms)
-
         # Enable custom context menu on header
         header = self.tableWidget.horizontalHeader()
         header.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -476,24 +487,16 @@ class StructureVariableControls(QWidget):
                 self.after_update_data()
 
     def after_update_data(self):
-        self.structure_control_widget.add_sphere(initialize=False)
-        self.structure_control_widget.add_bonds()
+        self.request_structure_update(
+            self.UPDATE_ATOMS | self.UPDATE_BONDS | self.UPDATE_BOND_LABELS | self.UPDATE_STATUS,
+            defer_bonds=True,
+        )
 
-    def deleteRow(self, row):
+    def deleteRow(self, row, rebuild=True):
         # Call delete_row method from data manager
         self.structure_control_widget.delete_row(row)
-
-        # Clear the table and remove it from layout
-        self.tableWidget.blockSignals(True)
-        self.tableWidget.clearContents()
-        self.layout.removeWidget(self.tableWidget)
-        self.tableWidget.blockSignals(False)
-
-        # Rebuild the table with the updated data
-        self.create_table()
-
-        # Add the new table to the layout
-        self.layout.addWidget(self.tableWidget)
+        if rebuild:
+            self.rebuild_table()
 
     def on_selection_changed(self):
         colors = vtkNamedColors()
@@ -632,11 +635,15 @@ class StructureVariableControls(QWidget):
 
     def delete_atoms(self):
         selected_rows = sorted(set(item.row() for item in self.tableWidget.selectedItems()), reverse=True)
+        if not selected_rows:
+            return
         for index in selected_rows:
-            self.deleteRow(index)
+            self.deleteRow(index, rebuild=False)
             self.atom_deleted.emit(index)
-        self.structure_control_widget.add_sphere(initialize=False)
-        self.structure_control_widget.add_bonds()
+        self.rebuild_table([])
+        self.request_structure_update(
+            self.UPDATE_ATOMS | self.UPDATE_BONDS | self.UPDATE_BOND_LABELS | self.UPDATE_STATUS
+        )
         self.all_atoms_deleted.emit("done")
 
     def add_atom(self):
@@ -675,22 +682,14 @@ class StructureVariableControls(QWidget):
         self.change_table_when_atom_added()
         print("added")
 
+    @timed()
     def change_table_when_atom_added(self):
-        self.tableWidget.blockSignals(True)
         selected_rows = self.get_selected_rows()
-        self.tableWidget.clearContents()
-        self.layout.removeWidget(self.tableWidget)
-        self.tableWidget.blockSignals(False)
-
-        # Rebuild the table with the updated data
-        self.create_table()
-        self.rectangle_rows_selection(rows=selected_rows)
-
-        # Add the new table to the layout
-        self.layout.addWidget(self.tableWidget)
+        self.rebuild_table(selected_rows)
         self.structure_control_widget.structure_plot_widget.assign_missing_colors()
-        self.structure_control_widget.add_sphere(initialize=False)
-        self.structure_control_widget.add_bonds()
+        self.request_structure_update(
+            self.UPDATE_ATOMS | self.UPDATE_BONDS | self.UPDATE_BOND_LABELS | self.UPDATE_STATUS
+        )
 
     def change_constrain(self, column, constrain):
         indexes = self.tableWidget.selectionModel().selectedRows()
@@ -698,6 +697,102 @@ class StructureVariableControls(QWidget):
             self.tableWidget.setItem(index.row(), column, QTableWidgetItem(constrain))
             self.updateData(index.row(), column)
             self.structure_control_widget.structure_plot_widget.data.constrains[index.row()] = constrain
+
+    @timed()
+    def request_structure_update(self, flags, rows=None, defer_bonds=False):
+        rows = self._normalized_rows(rows)
+        if not defer_bonds and self.deferred_structure_update_flags:
+            flags |= self.deferred_structure_update_flags
+            self.deferred_structure_update_flags = 0
+            self.structure_update_timer.stop()
+
+        if flags & self.UPDATE_TABLE_FULL:
+            self.rebuild_table(rows)
+        elif flags & self.UPDATE_TABLE:
+            self.update_table_coordinates(rows)
+
+        if flags & self.UPDATE_ATOMS:
+            self.structure_control_widget.add_sphere(initialize=False)
+
+        bond_flags = flags & (self.UPDATE_BONDS | self.UPDATE_BOND_LABELS)
+        if bond_flags and defer_bonds:
+            self.deferred_structure_update_flags |= bond_flags
+            self.structure_update_timer.start(self.structure_update_delay_ms)
+        else:
+            if flags & self.UPDATE_BONDS:
+                self.structure_control_widget.add_bonds()
+            if flags & self.UPDATE_BOND_LABELS:
+                self.update_bonds()
+
+        if flags & self.UPDATE_STATUS:
+            self.structure_control_widget.update_geometry_status()
+
+    @timed()
+    def flush_deferred_structure_updates(self):
+        flags = self.deferred_structure_update_flags
+        self.deferred_structure_update_flags = 0
+        if flags & self.UPDATE_BONDS:
+            self.structure_control_widget.add_bonds()
+        if flags & self.UPDATE_BOND_LABELS:
+            self.update_bonds()
+
+    def _normalized_rows(self, rows):
+        if rows is None:
+            return None
+        return sorted(set(row for row in rows if row is not None))
+
+    @timed()
+    def update_table_coordinates(self, rows=None):
+        coordinates = self.structure_control_widget.structure_plot_widget.data.outcar_coordinates[
+            self.structure_control_widget.geometry_slider.value()]
+        if rows is None:
+            rows = range(min(len(coordinates), self.tableWidget.rowCount()))
+
+        sorting_enabled = self.tableWidget.isSortingEnabled()
+        self.tableWidget.blockSignals(True)
+        self.tableWidget.setSortingEnabled(False)
+        try:
+            for row in rows:
+                if row < 0 or row >= self.tableWidget.rowCount() or row >= len(coordinates):
+                    continue
+                for offset, column in enumerate((3, 4, 5)):
+                    value = float(coordinates[row][offset])
+                    item = self.tableWidget.item(row, column)
+                    if item is None:
+                        self.tableWidget.setItem(row, column, MyTableWidgetItem(value))
+                    else:
+                        item.setText(f"{value:.2f}")
+                        item.setData(Qt.UserRole, value)
+        finally:
+            self.tableWidget.setSortingEnabled(sorting_enabled)
+            self.tableWidget.blockSignals(False)
+
+    @timed()
+    def rebuild_table(self, selected_rows=None):
+        if selected_rows is None:
+            selected_rows = self.get_selected_rows()
+        else:
+            selected_rows = self._normalized_rows(selected_rows)
+
+        old_table = self.tableWidget
+        if old_table is not None:
+            old_table.blockSignals(True)
+            self.layout.removeWidget(old_table)
+            old_table.setParent(None)
+            old_table.deleteLater()
+
+        self.create_table()
+        self.layout.addWidget(self.tableWidget)
+        self.select_table_rows(selected_rows)
+
+    def select_table_rows(self, rows):
+        self.tableWidget.blockSignals(True)
+        self.tableWidget.clearSelection()
+        for row in rows or []:
+            if 0 <= row < self.tableWidget.rowCount():
+                self.tableWidget.selectRow(row)
+        self.tableWidget.blockSignals(False)
+        self.on_selection_changed()
 
 
     def eventFilter(self, source, event):
@@ -797,6 +892,7 @@ class StructureVariableControls(QWidget):
 
         return view_direction, view_up, right_direction
 
+    @timed()
     def translate_object(self, direction):
         view_direction, view_up, right_direction = self.camera_directions()
 
@@ -818,7 +914,13 @@ class StructureVariableControls(QWidget):
         else:
             return
 
-        self.translate_selected_atoms(translation_vector, update_table=True, update_bonds=True)
+        rows = self.translate_selected_atoms(translation_vector, update_table=False, update_bonds=False)
+        if rows:
+            self.request_structure_update(
+                self.UPDATE_TABLE | self.UPDATE_BONDS | self.UPDATE_BOND_LABELS | self.UPDATE_STATUS,
+                rows=rows,
+                defer_bonds=True,
+            )
 
     def selected_actor_row_pairs(self):
         actors = self.structure_control_widget.structure_plot_widget.sphere_actors
@@ -828,6 +930,7 @@ class StructureVariableControls(QWidget):
                 rows.append(row)
         return [(actors[row], row) for row in rows]
 
+    @timed()
     def translate_selected_atoms(self, translation_vector, update_table=True, update_bonds=True):
         actor_row_pairs = self.selected_actor_row_pairs()
         if not actor_row_pairs:
@@ -838,6 +941,7 @@ class StructureVariableControls(QWidget):
             self.structure_control_widget.geometry_slider.value()]
 
         self.structure_control_widget.selected_actors = [actor for actor, row in actor_row_pairs]
+        rows = [row for actor, row in actor_row_pairs]
 
         for actor, row in actor_row_pairs:
             poly_data = actor.GetMapper().GetInput()
@@ -854,7 +958,7 @@ class StructureVariableControls(QWidget):
             coordinates[row][2] = actor.GetCenter()[2]
 
         if update_table:
-            self.block_and_update_table()
+            self.update_table_coordinates(rows)
 
         if update_bonds:
             self.structure_control_widget.add_bonds()
@@ -862,8 +966,7 @@ class StructureVariableControls(QWidget):
         else:
             self.structure_control_widget.structure_plot_widget.plotter.renderer.Render()
 
-        self.structure_control_widget.update_geometry_status()
-        return True
+        return rows
 
     def finish_selected_atom_drag(self):
         moved = self.selected_atom_drag_moved
@@ -871,25 +974,15 @@ class StructureVariableControls(QWidget):
         self.selected_atom_drag_last_pos = None
         self.selected_atom_drag_moved = False
         if moved:
-            self.block_and_update_table()
-            self.structure_control_widget.update_geometry_status()
+            rows = self.get_selected_rows()
+            self.request_structure_update(
+                self.UPDATE_TABLE | self.UPDATE_STATUS,
+                rows=rows,
+            )
 
+    @timed()
     def block_and_update_table(self):
-        self.tableWidget.blockSignals(True)
-        self.tableWidget.clearContents()
-        self.layout.removeWidget(self.tableWidget)
-        self.tableWidget.blockSignals(False)
-
-        # Rebuild the table with the updated data
-        self.create_table()
-
-        # Add the new table to the layout
-        self.layout.addWidget(self.tableWidget)
-
-        self.tableWidget.clearSelection()
-        selected_rows = self.get_selected_rows()
-        for row in selected_rows:
-            self.tableWidget.selectRow(row)
+        self.rebuild_table()
 
     def show_header_menu(self, pos: QPoint):
         header = self.tableWidget.horizontalHeader()
@@ -945,9 +1038,11 @@ class StructureVariableControls(QWidget):
                     coordinates[row][1] = pos[1]
                     coordinates[row][2] = pos[2]
 
-                self.block_and_update_table()
-                self.structure_control_widget.add_sphere(initialize=False)
-                self.structure_control_widget.add_bonds()
+                self.request_structure_update(
+                    self.UPDATE_TABLE | self.UPDATE_ATOMS | self.UPDATE_BONDS |
+                    self.UPDATE_BOND_LABELS | self.UPDATE_STATUS,
+                    rows=selected_rows,
+                )
         except IndexError:
             print("no atoms selected")
 
@@ -1026,16 +1121,18 @@ class StructureVariableControls(QWidget):
         self.tableWidget.blockSignals(False)
         self.tableWidget.blockSignals(False)
         self.structure_control_widget.structure_plot_widget.assign_missing_colors()
-        self.structure_control_widget.add_bonds()
-        self.structure_control_widget.add_sphere(initialize=False)
+        self.request_structure_update(
+            self.UPDATE_ATOMS | self.UPDATE_BONDS | self.UPDATE_BOND_LABELS | self.UPDATE_STATUS
+        )
 
     def sort_by_column(self):
         mapping = self.sort_mapping()
         self.tableWidget.blockSignals(True)
         self.tableWidget.update_all_data(mapping=mapping, sort=True)
         self.tableWidget.blockSignals(False)
-        self.structure_control_widget.add_bonds()
-        self.structure_control_widget.add_sphere(initialize=False)
+        self.request_structure_update(
+            self.UPDATE_ATOMS | self.UPDATE_BONDS | self.UPDATE_BOND_LABELS | self.UPDATE_STATUS
+        )
 
     def sort_mapping(self):
         """Create a mapping from old positions to new positions"""
@@ -1071,8 +1168,10 @@ class StructureVariableControls(QWidget):
         self.tableWidget.update_all_data(mapping=mapping, sort=True)
         self.tableWidget.blockSignals(False)
         self.structure_control_widget.structure_plot_widget.assign_missing_colors()
-        self.structure_control_widget.add_bonds()
-        self.structure_control_widget.add_sphere(initialize=False)
+        self.request_structure_update(
+            self.UPDATE_TABLE | self.UPDATE_ATOMS | self.UPDATE_BONDS |
+            self.UPDATE_BOND_LABELS | self.UPDATE_STATUS
+        )
 
     def set_rattle_magnitude(self, value):
         self.rattle_magnitude_value = value
@@ -1109,6 +1208,7 @@ class StructureVariableControls(QWidget):
             bond.clear_bond_labels()
         self.bonds = []
 
+    @timed()
     def update_bonds(self):
         for bond in self.bonds:
             bond.clear_bond_labels()

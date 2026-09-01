@@ -8,12 +8,13 @@ from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLabel, QFileDialog, QDialog, 
     QHBoxLayout, QApplication, QGroupBox, QSpinBox, QPushButton
 from PyQt5.QtGui import QIcon, QCursor
 
-from scipy.spatial.distance import pdist, squareform
+from scipy.spatial import cKDTree
 
 from RangeSlider import QRangeSlider
 from vtk import vtkNamedColors, vtkPlaneSource, vtkActor, vtkLineSource, vtkSphereSource, vtkTubeFilter, \
     vtkPolyDataMapper, vtkArrowSource, \
-vtkTransformPolyDataFilter, vtkTransform
+vtkTransformPolyDataFilter, vtkTransform, vtkPoints, vtkCellArray, vtkLine, vtkPolyData
+from perf_timing import timed, timed_block
 from vtkmodules.vtkCommonCore import (
     vtkMath,
     vtkMinimalStandardRandomSequence
@@ -606,6 +607,7 @@ class StructureControlsWidget(QWidget):
             visibility_mask.append(actor.GetVisibility())
         return visibility_mask
 
+    @timed()
     def add_sphere(self, initialize=False):
         """adds atoms from single geometry step as spheres to renderer.
          Using VTK code because it is 100x faster than pyvista
@@ -681,6 +683,7 @@ class StructureControlsWidget(QWidget):
         actor.VisibilityOff()  # Equivalent to render=False in PyVista
         return actor, sphere_source
 
+    @timed()
     def add_bonds(self, show_all=True):
         """
         render bonds as bicolor lines or cylinders. First calculate all pairs,
@@ -697,13 +700,18 @@ class StructureControlsWidget(QWidget):
         coordinates = self.structure_plot_widget.data.outcar_coordinates[geometry_slider_value]
 
         if self.structure_plot_widget.bond_actors is not None:
-            for actor in self.structure_plot_widget.bond_actors:
-                self.structure_plot_widget.plotter.renderer.RemoveActor(actor)
+            with timed_block(
+                "StructureControlsWidget.add_bonds.remove_old_actors",
+                actors=len(self.structure_plot_widget.bond_actors),
+            ):
+                for actor in self.structure_plot_widget.bond_actors:
+                    self.structure_plot_widget.plotter.renderer.RemoveActor(actor)
 
         self.structure_plot_widget.bond_actors = []
         self.structure_plot_widget.coord_pairs = []
         if not self.bond_visibility:
-            self.structure_plot_widget.plotter.renderer.Render()
+            with timed_block("StructureControlsWidget.add_bonds.render"):
+                self.structure_plot_widget.plotter.renderer.Render()
             return
 
         visibility_mask = self.get_spheres_visibility()
@@ -712,28 +720,76 @@ class StructureControlsWidget(QWidget):
             atom_color_indices = [i for i, v in enumerate(visibility_mask) if v == 1]
             coordinates = [coordinates[i] for i in atom_color_indices]
         if len(coordinates) < 2:
-            self.structure_plot_widget.plotter.renderer.Render()
+            with timed_block("StructureControlsWidget.add_bonds.render"):
+                self.structure_plot_widget.plotter.renderer.Render()
             return
-        # Calculate pairwise distances
-        distances = squareform(pdist(coordinates))
 
-        # Get the upper triangular part of the distances matrix
-        upper_triangle = np.triu(distances, k=1)
+        coordinates = np.array(coordinates, dtype=float)
+        with timed_block("StructureControlsWidget.add_bonds.neighbor_lookup", atoms=len(coordinates)):
+            pairs = sorted(cKDTree(coordinates).query_pairs(bond_threshold))
 
-        # Find pairs with distance less than threshold (excluding distances between the same point pairs)
-        pairs = np.argwhere((upper_triangle < bond_threshold) & (upper_triangle > 0))
-        for pair in pairs:
-            point1, point2 = pair
-            coord1 = coordinates[point1]
-            coord2 = coordinates[point2]
-            color1 = self.structure_plot_widget.atom_colors[atom_color_indices[point1]]
-            color2 = self.structure_plot_widget.atom_colors[atom_color_indices[point2]]
-            self.structure_plot_widget.coord_pairs.append([coord1, coord2])
-            for actor in self._create_bicolor_bond(coord1, coord2, color1, color2):
+        with timed_block("StructureControlsWidget.add_bonds.prepare_segments", pairs=len(pairs)):
+            segments_by_color = {}
+            for point1, point2 in pairs:
+                coord1 = coordinates[point1]
+                coord2 = coordinates[point2]
+                midpoint = (coord1 + coord2) / 2
+                color1 = self._color_key(self.structure_plot_widget.atom_colors[atom_color_indices[point1]])
+                color2 = self._color_key(self.structure_plot_widget.atom_colors[atom_color_indices[point2]])
+                segments_by_color.setdefault(color1, []).append((coord1, midpoint))
+                segments_by_color.setdefault(color2, []).append((midpoint, coord2))
+                self.structure_plot_widget.coord_pairs.append([coord1.tolist(), coord2.tolist()])
+
+        with timed_block(
+            "StructureControlsWidget.add_bonds.create_pooled_actors",
+            pairs=len(pairs),
+            actors=len(segments_by_color),
+        ):
+            for color, segments in segments_by_color.items():
+                actor = self._create_bond_segments_actor(segments, color)
                 self.structure_plot_widget.plotter.renderer.AddActor(actor)
                 self.structure_plot_widget.bond_actors.append(actor)
-        self.structure_plot_widget.plotter.renderer.Render()
+        with timed_block("StructureControlsWidget.add_bonds.render"):
+            self.structure_plot_widget.plotter.renderer.Render()
         return
+
+    def _create_bond_segments_actor(self, segments, color):
+        points = vtkPoints()
+        lines = vtkCellArray()
+
+        for start, end in segments:
+            point_id = points.GetNumberOfPoints()
+            points.InsertNextPoint(start.tolist())
+            points.InsertNextPoint(end.tolist())
+            line = vtkLine()
+            line.GetPointIds().SetId(0, point_id)
+            line.GetPointIds().SetId(1, point_id + 1)
+            lines.InsertNextCell(line)
+
+        poly_data = vtkPolyData()
+        poly_data.SetPoints(points)
+        poly_data.SetLines(lines)
+
+        mapper = vtkPolyDataMapper()
+        if self.bond_render_mode == "cylinders":
+            tube_filter = vtkTubeFilter()
+            tube_filter.SetInputData(poly_data)
+            tube_filter.SetRadius(self.bond_cylinder_radius)
+            tube_filter.SetNumberOfSides(24)
+            tube_filter.CappingOn()
+            mapper.SetInputConnection(tube_filter.GetOutputPort())
+        else:
+            mapper.SetInputData(poly_data)
+
+        actor = vtkActor()
+        actor.SetMapper(mapper)
+        if self.bond_render_mode == "lines":
+            actor.GetProperty().SetLineWidth(5)
+        actor.GetProperty().SetColor(color)
+        return actor
+
+    def _color_key(self, color):
+        return tuple(round(value, 6) for value in self._normalized_rgb(color))
 
     def _create_bicolor_bond(self, coord1, coord2, color1, color2):
         coord1 = np.array(coord1, dtype=float)
