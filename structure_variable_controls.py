@@ -7,7 +7,7 @@ import  os
 from PyQt5.QtWidgets import QApplication, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, \
     QPushButton, QHBoxLayout, QHeaderView, QFileDialog, QAbstractItemView, QLabel, QLineEdit, QCheckBox, \
      QDialogButtonBox, QSlider, QGroupBox, QMessageBox, QAbstractScrollArea, QSizePolicy, QMenu, QAction
-from PyQt5.QtCore import pyqtSlot, Qt, pyqtSignal, QItemSelectionModel, QItemSelection, QVariant, QPoint
+from PyQt5.QtCore import pyqtSlot, Qt, pyqtSignal, QItemSelectionModel, QItemSelection, QVariant, QPoint, QEvent
 import traceback
 from periodic_table import PeriodicTable
 from itertools import groupby, combinations
@@ -353,6 +353,10 @@ class StructureVariableControls(QWidget):
         self.structure_control_widget.geometry_slider.valueChanged.connect(self.tableWidget.update_all_data)
         self.movement_slider_value = 50
         self.rattle_magnitude_value = 10
+        self.selected_atom_drag_active = False
+        self.selected_atom_drag_last_pos = None
+        self.selected_atom_drag_moved = False
+        self.structure_control_widget.structure_plot_widget.plotter.interactor.installEventFilter(self)
 
     def create_table(self):
         self.tableWidget = TableWidgetDragRows(self)
@@ -696,30 +700,109 @@ class StructureVariableControls(QWidget):
             self.structure_control_widget.structure_plot_widget.data.constrains[index.row()] = constrain
 
 
-    def translate_object(self, direction):
+    def eventFilter(self, source, event):
+        interactor = self.structure_control_widget.structure_plot_widget.plotter.interactor
+        if source is interactor and self.handle_selected_atom_drag_event(event):
+            return True
+        return super().eventFilter(source, event)
+
+    def handle_selected_atom_drag_event(self, event):
+        if event.type() == QEvent.MouseButtonPress:
+            if event.button() == Qt.MiddleButton and self.shift_is_pressed() and self.selected_actor_row_pairs():
+                self.selected_atom_drag_active = True
+                self.selected_atom_drag_last_pos = event.pos()
+                self.selected_atom_drag_moved = False
+                event.accept()
+                return True
+            return False
+
+        if event.type() == QEvent.MouseMove and self.selected_atom_drag_active:
+            if not event.buttons() & Qt.MiddleButton:
+                self.finish_selected_atom_drag()
+                return False
+            if not self.shift_is_pressed():
+                self.finish_selected_atom_drag()
+                event.accept()
+                return True
+
+            delta = event.pos() - self.selected_atom_drag_last_pos
+            self.selected_atom_drag_last_pos = event.pos()
+            if delta.isNull():
+                event.accept()
+                return True
+
+            translation_vector = self.screen_drag_translation(delta.x(), delta.y())
+            if self.translate_selected_atoms(translation_vector, update_table=False, update_bonds=True):
+                self.selected_atom_drag_moved = True
+            event.accept()
+            return True
+
+        if event.type() == QEvent.MouseButtonRelease and self.selected_atom_drag_active:
+            if event.button() == Qt.MiddleButton:
+                self.finish_selected_atom_drag()
+                event.accept()
+                return True
+
+        return False
+
+    @staticmethod
+    def shift_is_pressed():
+        return bool(QApplication.keyboardModifiers() & Qt.ShiftModifier)
+
+    def screen_drag_translation(self, dx, dy):
         camera = self.structure_control_widget.plotter.camera
 
-        # Get camera position and focal point
         camera_position = np.array(camera.GetPosition())
         focal_point = np.array(camera.GetFocalPoint())
 
-        # Calculate the viewing direction (normal to the camera)
         view_direction = focal_point - camera_position
-        view_direction /= np.linalg.norm(view_direction)  # Normalize the vector
+        view_direction_norm = np.linalg.norm(view_direction)
+        if view_direction_norm == 0:
+            return np.zeros(3)
+        view_direction /= view_direction_norm
 
-        # Get the view up direction
         view_up = np.array(camera.GetViewUp())
-        view_angle = camera.GetParallelScale()
-        print(view_angle)
+        view_up = view_up - np.dot(view_up, view_direction) * view_direction
+        view_up_norm = np.linalg.norm(view_up)
+        if view_up_norm == 0:
+            return np.zeros(3)
+        view_up /= view_up_norm
 
-        # Calculate the right direction (left-to-right on the screen)
         right_direction = np.cross(view_direction, view_up)
-        right_direction /= np.linalg.norm(right_direction)  # Normalize the vector
+        right_direction_norm = np.linalg.norm(right_direction)
+        if right_direction_norm == 0:
+            return np.zeros(3)
+        right_direction /= right_direction_norm
 
-        # Calculate the distance to move (1% of the interactor width)
+        interactor = self.structure_control_widget.structure_plot_widget.plotter.interactor
+        interactor_height = max(interactor.height(), 1)
+        world_units_per_pixel = 2 * camera.GetParallelScale() / interactor_height
+        return world_units_per_pixel * (dx * right_direction - dy * view_up)
+
+    def camera_directions(self):
+        camera = self.structure_control_widget.plotter.camera
+
+        camera_position = np.array(camera.GetPosition())
+        focal_point = np.array(camera.GetFocalPoint())
+
+        view_direction = focal_point - camera_position
+        view_direction /= np.linalg.norm(view_direction)
+
+        view_up = np.array(camera.GetViewUp())
+        view_up = view_up - np.dot(view_up, view_direction) * view_direction
+        view_up /= np.linalg.norm(view_up)
+
+        right_direction = np.cross(view_direction, view_up)
+        right_direction /= np.linalg.norm(right_direction)
+
+        return view_direction, view_up, right_direction
+
+    def translate_object(self, direction):
+        view_direction, view_up, right_direction = self.camera_directions()
+
+        view_angle = self.structure_control_widget.plotter.camera.GetParallelScale()
         move_distance = 0.001 * view_angle * self.movement_slider_value
 
-        # Determine translation vector based on the direction
         if direction == 'right':
             translation_vector = move_distance * right_direction
         elif direction == 'left':
@@ -732,29 +815,64 @@ class StructureVariableControls(QWidget):
             translation_vector = -move_distance * view_direction
         elif direction == 'out':
             translation_vector = move_distance * view_direction
+        else:
+            return
 
+        self.translate_selected_atoms(translation_vector, update_table=True, update_bonds=True)
+
+    def selected_actor_row_pairs(self):
+        actors = self.structure_control_widget.structure_plot_widget.sphere_actors
+        rows = []
+        for row in self.get_selected_rows():
+            if row not in rows and 0 <= row < len(actors):
+                rows.append(row)
+        return [(actors[row], row) for row in rows]
+
+    def translate_selected_atoms(self, translation_vector, update_table=True, update_bonds=True):
+        actor_row_pairs = self.selected_actor_row_pairs()
+        if not actor_row_pairs:
+            return False
+
+        translation_vector = np.array(translation_vector, dtype=float)
         coordinates = self.structure_control_widget.structure_plot_widget.data.outcar_coordinates[
-                self.structure_control_widget.geometry_slider.value()]
+            self.structure_control_widget.geometry_slider.value()]
 
-        selected_rows = self.get_selected_rows()
+        self.structure_control_widget.selected_actors = [actor for actor, row in actor_row_pairs]
 
-        for actor, row in zip(self.structure_control_widget.selected_actors, selected_rows):
-
-            points = actor.GetMapper().GetInput().GetPoints()
+        for actor, row in actor_row_pairs:
+            poly_data = actor.GetMapper().GetInput()
+            points = poly_data.GetPoints()
             num_points = points.GetNumberOfPoints()
             for i in range(num_points):
-                new_points = points.GetPoint(i) + translation_vector
-                points.SetPoint(i, new_points)
+                point = np.array(points.GetPoint(i), dtype=float)
+                points.SetPoint(i, (point + translation_vector).tolist())
             points.Modified()
+            poly_data.Modified()
 
             coordinates[row][0] = actor.GetCenter()[0]
             coordinates[row][1] = actor.GetCenter()[1]
             coordinates[row][2] = actor.GetCenter()[2]
 
-        self.block_and_update_table()
-        self.structure_control_widget.add_bonds()
-        self.update_bonds()
+        if update_table:
+            self.block_and_update_table()
+
+        if update_bonds:
+            self.structure_control_widget.add_bonds()
+            self.update_bonds()
+        else:
+            self.structure_control_widget.structure_plot_widget.plotter.renderer.Render()
+
         self.structure_control_widget.update_geometry_status()
+        return True
+
+    def finish_selected_atom_drag(self):
+        moved = self.selected_atom_drag_moved
+        self.selected_atom_drag_active = False
+        self.selected_atom_drag_last_pos = None
+        self.selected_atom_drag_moved = False
+        if moved:
+            self.block_and_update_table()
+            self.structure_control_widget.update_geometry_status()
 
     def block_and_update_table(self):
         self.tableWidget.blockSignals(True)
