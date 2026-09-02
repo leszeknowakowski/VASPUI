@@ -18,7 +18,6 @@ from ase.constraints import FixBondLength, FixLinearTriatomic
 from config import AppConfig
 AppConfig.load()
 from vtk import vtkNamedColors,  vtkActor, vtkPoints, vtkCellArray, vtkLine, vtkPolyData, vtkPolyDataMapper
-from perf_timing import timed
 
 toc = time.perf_counter()
 print(f'importing in structure variable controls: {toc - tic:0.4f}')
@@ -370,7 +369,7 @@ class StructureVariableControls(QWidget):
         self.structure_update_timer.timeout.connect(self.flush_deferred_structure_updates)
         self.structure_control_widget.structure_plot_widget.plotter.interactor.installEventFilter(self)
 
-    @timed()
+
     def create_table(self):
         self.tableWidget = TableWidgetDragRows(self)
         self.tableWidget.setSelectionBehavior(QTableWidget.SelectRows)
@@ -682,7 +681,7 @@ class StructureVariableControls(QWidget):
         self.change_table_when_atom_added()
         print("added")
 
-    @timed()
+
     def change_table_when_atom_added(self):
         selected_rows = self.get_selected_rows()
         self.rebuild_table(selected_rows)
@@ -698,7 +697,7 @@ class StructureVariableControls(QWidget):
             self.updateData(index.row(), column)
             self.structure_control_widget.structure_plot_widget.data.constrains[index.row()] = constrain
 
-    @timed()
+
     def request_structure_update(self, flags, rows=None, defer_bonds=False):
         rows = self._normalized_rows(rows)
         if not defer_bonds and self.deferred_structure_update_flags:
@@ -727,7 +726,7 @@ class StructureVariableControls(QWidget):
         if flags & self.UPDATE_STATUS:
             self.structure_control_widget.update_geometry_status()
 
-    @timed()
+
     def flush_deferred_structure_updates(self):
         flags = self.deferred_structure_update_flags
         self.deferred_structure_update_flags = 0
@@ -741,7 +740,7 @@ class StructureVariableControls(QWidget):
             return None
         return sorted(set(row for row in rows if row is not None))
 
-    @timed()
+
     def update_table_coordinates(self, rows=None):
         coordinates = self.structure_control_widget.structure_plot_widget.data.outcar_coordinates[
             self.structure_control_widget.geometry_slider.value()]
@@ -767,7 +766,7 @@ class StructureVariableControls(QWidget):
             self.tableWidget.setSortingEnabled(sorting_enabled)
             self.tableWidget.blockSignals(False)
 
-    @timed()
+
     def rebuild_table(self, selected_rows=None):
         if selected_rows is None:
             selected_rows = self.get_selected_rows()
@@ -892,7 +891,7 @@ class StructureVariableControls(QWidget):
 
         return view_direction, view_up, right_direction
 
-    @timed()
+
     def translate_object(self, direction):
         view_direction, view_up, right_direction = self.camera_directions()
 
@@ -930,7 +929,7 @@ class StructureVariableControls(QWidget):
                 rows.append(row)
         return [(actors[row], row) for row in rows]
 
-    @timed()
+
     def translate_selected_atoms(self, translation_vector, update_table=True, update_bonds=True):
         actor_row_pairs = self.selected_actor_row_pairs()
         if not actor_row_pairs:
@@ -980,7 +979,7 @@ class StructureVariableControls(QWidget):
                 rows=rows,
             )
 
-    @timed()
+
     def block_and_update_table(self):
         self.rebuild_table()
 
@@ -1208,7 +1207,7 @@ class StructureVariableControls(QWidget):
             bond.clear_bond_labels()
         self.bonds = []
 
-    @timed()
+
     def update_bonds(self):
         for bond in self.bonds:
             bond.clear_bond_labels()
