@@ -355,8 +355,7 @@ class StructureVariableControls(QWidget):
         self.tableWidget.setMinimumWidth(0)
 
         self.structure_control_widget.selected_actors_changed.connect(lambda: self.rectangle_rows_selection(rows=None))
-        self.structure_control_widget.geometry_slider.valueChanged.connect(self.update_bonds)
-        self.structure_control_widget.geometry_slider.valueChanged.connect(self.change_table_when_atom_added)
+        self.structure_control_widget.geometry_slider.valueChanged.connect(self.on_geometry_step_changed)
         self.movement_slider_value = 50
         self.rattle_magnitude_value = 10
         self.selected_atom_drag_active = False
@@ -508,6 +507,7 @@ class StructureVariableControls(QWidget):
 
         selected_rows = self.tableWidget.selectionModel().selectedRows()
         if not selected_rows:
+            self.structure_control_widget.add_bonds()
             return
 
         selected_rows_indexes = set()
@@ -517,6 +517,7 @@ class StructureVariableControls(QWidget):
             if 0 <= row < len(actors):
                 actors[row].GetProperty().SetColor(colors.GetColor3d('Yellow'))
                 self.structure_control_widget.selected_actors.append(actors[row])
+        self.structure_control_widget.add_bonds()
         return
 
     def is_row_selected(self, row):
@@ -688,6 +689,12 @@ class StructureVariableControls(QWidget):
         self.structure_control_widget.structure_plot_widget.assign_missing_colors()
         self.request_structure_update(
             self.UPDATE_ATOMS | self.UPDATE_BONDS | self.UPDATE_BOND_LABELS | self.UPDATE_STATUS
+        )
+
+    def on_geometry_step_changed(self, *_args):
+        self.request_structure_update(
+            self.UPDATE_TABLE | self.UPDATE_ATOMS | self.UPDATE_BONDS |
+            self.UPDATE_BOND_LABELS | self.UPDATE_STATUS
         )
 
     def change_constrain(self, column, constrain):

@@ -725,6 +725,8 @@ class StructureControlsWidget(QWidget):
             return
 
         coordinates = np.array(coordinates, dtype=float)
+        selected_atom_indices = self._selected_atom_indices()
+        selected_bond_color = self._color_key((1.0, 1.0, 0.0))
         with timed_block("StructureControlsWidget.add_bonds.neighbor_lookup", atoms=len(coordinates)):
             pairs = sorted(cKDTree(coordinates).query_pairs(bond_threshold))
 
@@ -734,8 +736,14 @@ class StructureControlsWidget(QWidget):
                 coord1 = coordinates[point1]
                 coord2 = coordinates[point2]
                 midpoint = (coord1 + coord2) / 2
-                color1 = self._color_key(self.structure_plot_widget.atom_colors[atom_color_indices[point1]])
-                color2 = self._color_key(self.structure_plot_widget.atom_colors[atom_color_indices[point2]])
+                atom1_index = atom_color_indices[point1]
+                atom2_index = atom_color_indices[point2]
+                if atom1_index in selected_atom_indices or atom2_index in selected_atom_indices:
+                    color1 = selected_bond_color
+                    color2 = selected_bond_color
+                else:
+                    color1 = self._color_key(self.structure_plot_widget.atom_colors[atom1_index])
+                    color2 = self._color_key(self.structure_plot_widget.atom_colors[atom2_index])
                 segments_by_color.setdefault(color1, []).append((coord1, midpoint))
                 segments_by_color.setdefault(color2, []).append((midpoint, coord2))
                 self.structure_plot_widget.coord_pairs.append([coord1.tolist(), coord2.tolist()])
@@ -752,6 +760,14 @@ class StructureControlsWidget(QWidget):
         with timed_block("StructureControlsWidget.add_bonds.render"):
             self.structure_plot_widget.plotter.renderer.Render()
         return
+
+    def _selected_atom_indices(self):
+        selected_actor_ids = {id(actor) for actor in self.selected_actors}
+        return {
+            index
+            for index, actor in enumerate(self.structure_plot_widget.sphere_actors)
+            if id(actor) in selected_actor_ids
+        }
 
     def _create_bond_segments_actor(self, segments, color):
         points = vtkPoints()
