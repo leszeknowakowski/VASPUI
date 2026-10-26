@@ -87,6 +87,8 @@ class StructureControlsWidget(QWidget):
         self.bond_render_mode = "lines"
         self.bond_cylinder_radius = 0.12
         self.sphere_radius = 0.5
+        self.border_atom_tolerance = 0.02
+        self.border_atom_margin = 0.002
         self.constrains = self.structure_plot_widget.data.constrains
         self.selected_actors = []
 
@@ -607,6 +609,32 @@ class StructureControlsWidget(QWidget):
             visibility_mask.append(actor.GetVisibility())
         return visibility_mask
 
+    def get_current_display_coordinates(self):
+        coordinates = self.structure_plot_widget.data.outcar_coordinates[self.geometry_slider.value()]
+        return self._border_atoms_outside_cell(coordinates)
+
+    def _border_atoms_outside_cell(self, coordinates):
+        coordinates = np.array(coordinates, dtype=float)
+        if coordinates.size == 0:
+            return coordinates
+
+        cell = np.array(self.structure_plot_widget.data.unit_cell_vectors, dtype=float)
+        if cell.shape != (3, 3):
+            return coordinates
+
+        try:
+            inverse_cell = np.linalg.inv(cell)
+        except np.linalg.LinAlgError:
+            return coordinates
+
+        fractional = coordinates @ inverse_cell
+        wrapped = fractional - np.floor(fractional)
+        nearest_boundary = np.where(wrapped > 0.5, wrapped - 1.0, wrapped)
+        border_mask = np.abs(nearest_boundary) <= self.border_atom_tolerance
+        display_fractional = fractional.copy()
+        display_fractional[border_mask] = -np.abs(nearest_boundary[border_mask]) - self.border_atom_margin
+        return display_fractional @ cell
+
     @timed()
     def add_sphere(self, initialize=False):
         """adds atoms from single geometry step as spheres to renderer.
@@ -617,7 +645,7 @@ class StructureControlsWidget(QWidget):
         for actor in self.structure_plot_widget.sphere_actors:
             self.plotter.renderer.RemoveActor(actor)
         self.structure_plot_widget.sphere_actors = []
-        coordinates = self.structure_plot_widget.data.outcar_coordinates[self.geometry_slider.value()]
+        coordinates = self.get_current_display_coordinates()
         self.update_geometry_status()
         self.structure_plot_widget.assign_missing_colors()
         for idx, (coord, col) in enumerate(zip(coordinates, self.structure_plot_widget.atom_colors)):
@@ -697,7 +725,9 @@ class StructureControlsWidget(QWidget):
 
         bond_threshold = self.bond_threshold
         geometry_slider_value = self.geometry_slider.value()
-        coordinates = self.structure_plot_widget.data.outcar_coordinates[geometry_slider_value]
+        coordinates = self._border_atoms_outside_cell(
+            self.structure_plot_widget.data.outcar_coordinates[geometry_slider_value]
+        )
 
         if self.structure_plot_widget.bond_actors is not None:
             with timed_block(
@@ -942,7 +972,7 @@ class StructureControlsWidget(QWidget):
         """ switches on and off constrains visibility"""
         if self.constrains_all_cb.isChecked():
             self.structure_plot_widget.plotter.renderer.RemoveActor(self.structure_plot_widget.constrain_actor)
-            coords = np.array(self.structure_plot_widget.data.outcar_coordinates[self.geometry_slider.value()])
+            coords = self.get_current_display_coordinates()
             constr = [constr[0] for constr in self.structure_plot_widget.data.all_constrains]
             self.structure_plot_widget.constrain_actor = self.plotter.add_point_labels(coords, constr, font_size=30,
                                                                                        show_points=False,
@@ -988,7 +1018,7 @@ class StructureControlsWidget(QWidget):
         self.structure_plot_widget.plotter.renderer.RemoveActor(self.structure_plot_widget.symb_actor)
         if self.numbers_cb.isChecked():
             symbols = self.structure_plot_widget.data.atoms_symb_and_num
-            coords = np.array(self.structure_plot_widget.data.outcar_coordinates[self.geometry_slider.value()])
+            coords = self.get_current_display_coordinates()
             self.structure_plot_widget.symb_actor = self.plotter.add_point_labels(coords, symbols, font_size=30,
                                                                                   show_points=False, always_visible=True,
                                                                                   shape=None)
@@ -999,7 +1029,7 @@ class StructureControlsWidget(QWidget):
         height = slidervalue[0] / 100 * self.structure_plot_widget.data.z
         end = slidervalue[1] / 100 * self.structure_plot_widget.data.z
         indices = []
-        global_coordinates = np.array(self.structure_plot_widget.data.outcar_coordinates[self.geometry_slider.value()])
+        global_coordinates = self.get_current_display_coordinates()
         if self.selected_actors != []:
             coordinates = []
             for actor in self.selected_actors:
@@ -1007,7 +1037,7 @@ class StructureControlsWidget(QWidget):
                 coordinates.append(list(center))
             coordinates = np.array(coordinates)
             for center in coordinates:
-                for index, coord in enumerate(np.array(self.structure_plot_widget.data.outcar_coordinates[self.geometry_slider.value()])):
+                for index, coord in enumerate(global_coordinates):
                     if (np.round(center, 2) == np.round(coord, 2)).all():
                         indices.append(index)
         else:
@@ -1032,7 +1062,7 @@ class StructureControlsWidget(QWidget):
     def add_symbol_and_number(self):
         """ renders an atom symbol and number"""
         self.structure_plot_widget.plotter.renderer.RemoveActor(self.structure_plot_widget.symb_actor)
-        coordinates = self.structure_plot_widget.data.outcar_coordinates[self.geometry_slider.value()]
+        coordinates = self.get_current_display_coordinates()
         symb_num = self.structure_plot_widget.data.atoms_symb_and_num
         coords = list(np.array(coordinates) + [0, -0.2, 0.5])
         self.structure_plot_widget.symb_actor = self.structure_plot_widget.plotter.add_point_labels(coords, symb_num,
@@ -1203,7 +1233,9 @@ class StructureControlsWidget(QWidget):
         current_iter = self.geometry_slider.value()
         if hasattr(self.structure_plot_widget.data, "outcar_data"):
             forces = self.structure_plot_widget.data.outcar_data.forces[current_iter]
-            coordinates = self.structure_plot_widget.data.outcar_data.find_coordinates()[current_iter]
+            coordinates = self._border_atoms_outside_cell(
+                self.structure_plot_widget.data.outcar_data.find_coordinates()[current_iter]
+            )
             self.forces_actors = []
             if self.forces_cb.isChecked():
                 for i, (center, force) in enumerate(zip(coordinates, forces)):
