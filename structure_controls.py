@@ -14,6 +14,7 @@ from RangeSlider import QRangeSlider
 from vtk import vtkNamedColors, vtkPlaneSource, vtkActor, vtkLineSource, vtkSphereSource, vtkTubeFilter, \
     vtkPolyDataMapper, vtkArrowSource, \
 vtkTransformPolyDataFilter, vtkTransform, vtkPoints, vtkCellArray, vtkLine, vtkPolyData
+from perf_timing import timed, timed_block
 from vtkmodules.vtkCommonCore import (
     vtkMath,
     vtkMinimalStandardRandomSequence
