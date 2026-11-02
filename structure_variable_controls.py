@@ -325,13 +325,16 @@ class StructureVariableControls(QWidget):
         self.set_magmom_input_field = QLineEdit()
         self.set_magmom_input_field.setMaximumWidth(800)
         self.set_magmom_btn = QPushButton("set magmom")
+        self.set_magmom_from_mags_btn = QPushButton("set from mags")
 
         self.print_magmom_btn.clicked.connect(self.print_magmoms)
         self.set_magmom_btn.clicked.connect(self.set_magmoms)
+        self.set_magmom_from_mags_btn.clicked.connect(self.set_magmoms_from_mags)
 
         self.another_btn_layout.addWidget(self.print_magmom_btn)
         self.another_btn_layout.addWidget(self.set_magmom_input_field)
         self.another_btn_layout.addWidget(self.set_magmom_btn)
+        self.another_btn_layout.addWidget(self.set_magmom_from_mags_btn)
         self.layout.addLayout(self.another_btn_layout)
 
         # row of tags
@@ -1088,7 +1091,7 @@ class StructureVariableControls(QWidget):
 
         print('MAGMOM = ' + compressed_string)
 
-    def set_magmoms(self): # TODO: add function to create magmoms from current outcar mags
+    def set_magmoms(self):
         def check_type(s):
             try:
                 int(s)
@@ -1109,6 +1112,40 @@ class StructureVariableControls(QWidget):
             self.after_update_data()
         else:
             QMessageBox.warning(self, "Not a number", "A provided text is not a number")
+
+    def set_magmoms_from_mags(self):
+        outcar_data = getattr(self.structure_control_widget.structure_plot_widget.data, "outcar_data", None)
+        if outcar_data is None or not hasattr(outcar_data, "magnetizations"):
+            QMessageBox.warning(self, "No magnetizations", "No OUTCAR magnetizations are available.")
+            return
+
+        geometry_step = self.structure_control_widget.geometry_slider.value()
+        if geometry_step >= len(outcar_data.magnetizations):
+            QMessageBox.warning(self, "No magnetizations", "No magnetizations are available for the current geometry step.")
+            return
+
+        magnetizations = outcar_data.magnetizations[geometry_step]
+        if len(magnetizations) != self.tableWidget.rowCount():
+            QMessageBox.warning(self, "Magnetization mismatch", "The number of magnetizations does not match the number of atoms.")
+            return
+
+        try:
+            magmoms = [f"{float(mag) * 1.5:.2f}" for mag in magnetizations]
+        except (TypeError, ValueError):
+            QMessageBox.warning(self, "Invalid magnetization", "Current magnetizations contain non-numeric values.")
+            return
+
+        sorting_enabled = self.tableWidget.isSortingEnabled()
+        self.tableWidget.blockSignals(True)
+        self.tableWidget.setSortingEnabled(False)
+        try:
+            for row, magmom in enumerate(magmoms):
+                self.tableWidget.setItem(row, 9, QTableWidgetItem(magmom))
+            self.tableWidget.update_all_data()
+        finally:
+            self.tableWidget.setSortingEnabled(sorting_enabled)
+            self.tableWidget.blockSignals(False)
+        self.after_update_data()
 
     def set_tags(self):
         indexes = self.tableWidget.selectionModel().selectedRows()
