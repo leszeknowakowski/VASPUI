@@ -110,7 +110,7 @@ class ChargeAveragingDialog(QDialog):
 
         # Channel selector
         self.channel_combo = QComboBox()
-        self.channel_combo.addItems(["total", "spin", "alfa", "beta"])
+        self.update_available_channels()
 
         # Mode selector
         self.mode_combo = QComboBox()
@@ -165,7 +165,7 @@ class ChargeAveragingDialog(QDialog):
         self.plot_btn.clicked.connect(self.make_plot)
         self.mode_combo.currentTextChanged.connect(self.on_plot_controls_changed)
         self.axis_combo.currentIndexChanged.connect(self.on_plot_controls_changed)
-        self.data_combo.currentIndexChanged.connect(self.on_plot_controls_changed)
+        self.data_combo.currentIndexChanged.connect(self.on_data_changed)
         self.channel_combo.currentIndexChanged.connect(self.on_plot_controls_changed)
         self.slice_slider.valueChanged.connect(self.on_slice_slider_changed)
 
@@ -175,21 +175,41 @@ class ChargeAveragingDialog(QDialog):
     # GET DATA FROM YOUR EXISTING STRUCTURE
     # =====================================================
 
+    def update_available_channels(self):
+        path = self.data_combo.currentText()
+        channels = ["total"]
+        if path in self.parent_widget.chgcar_data and len(self.parent_widget.chgcar_data[path].all_numbers) > 1:
+            channels.extend(["spin", "alfa", "beta"])
+        self.channel_combo.clear()
+        self.channel_combo.addItems(channels)
+
+    def on_data_changed(self, *_args):
+        self.update_available_channels()
+        self.on_plot_controls_changed()
+
     def get_volumetric_data(self, path, channel):
+        if path not in self.parent_widget.chgcar_data:
+            return None
         data_obj = self.parent_widget.chgcar_data[path]
 
         if channel == "total":
             return data_obj.chop(data_obj.all_numbers[0], 1)
 
         elif channel == "spin":
+            if len(data_obj.all_numbers) < 2:
+                return None
             return data_obj.chop(data_obj.all_numbers[1], 1)
 
         elif channel == "alfa":
+            if len(data_obj.all_numbers) < 2:
+                return None
             if data_obj.alfa is None:
                 data_obj.calc_alfa_beta()
             return data_obj.alfa
 
         elif channel == "beta":
+            if len(data_obj.all_numbers) < 2:
+                return None
             if data_obj.beta is None:
                 data_obj.calc_alfa_beta()
             return data_obj.beta
@@ -290,13 +310,11 @@ class ChargeAveragingDialog(QDialog):
         mode = self.mode_combo.currentText()
         axis = self.axis_combo.currentIndex()
 
-        data_obj = self.parent_widget.chgcar_data[path]
-
         data = self.get_volumetric_data(path, channel)
-        lattice = data_obj._unit_cell_vectors
-
         if data is None:
             return
+        data_obj = self.parent_widget.chgcar_data[path]
+        lattice = data_obj._unit_cell_vectors
 
         # ================= AXIS AVERAGE =================
 

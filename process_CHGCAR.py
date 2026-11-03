@@ -312,15 +312,7 @@ class CHGCARParser(QThread):
         fobj.write('\n')
 
     def save_all_file(self, filename, spin_up, spin_down, aug, augdiff):
-        """Write VASP charge density in CHG format.
-
-          filename: str
-              Name of file to write to.
-          format: str
-              String specifying whether to write in CHGCAR or CHG
-              format.
-
-          """
+        """Write total density and, when present, spin density to CHGCAR."""
         import ase.io.vasp as aiv
         format = "chgcar"
         with open(filename, 'w') as fd:
@@ -338,14 +330,15 @@ class CHGCARParser(QThread):
                 self._write_chg(fd, chg, vol, format)
                 if format == 'chgcar':
                     fd.write(aug)
-                fd.write('\n')
-                for dim in chg.shape:
-                    fd.write(' %4i' % dim)
-                fd.write('\n')  # a new line after dim is required
-                self._write_chg(fd, spin_down[ii], vol, format)
-                if format == 'chgcar':
-                    # a new line is always provided self._write_chg
-                    fd.write(augdiff)
+                if spin_down is not None:
+                    fd.write('\n')
+                    for dim in chg.shape:
+                        fd.write(' %4i' % dim)
+                    fd.write('\n')  # a new line after dim is required
+                    self._write_chg(fd, spin_down[ii], vol, format)
+                    if format == 'chgcar':
+                        # a new line is always provided self._write_chg
+                        fd.write(augdiff)
 
 
 class VaspChargeDensity(QObject):

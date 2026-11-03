@@ -495,6 +495,13 @@ class ChgcarVis(QWidget):
     def _on_chgcar_finished(self, thread, init):
         self.chgcar_data[thread.file_path] = thread
 
+        has_spin = len(thread.all_numbers) > 1
+        for channel in ("spin", "alfa", "beta"):
+            self.spin_buttons[channel].setEnabled(has_spin)
+        self.flip_spin_button.setEnabled(has_spin)
+        if not has_spin and self.contour_type in ("spin", "alfa", "beta"):
+            self.contour_type = "total"
+
         if init:
             self.add_contours()
         self.close_progress_window()
@@ -537,48 +544,29 @@ class ChgcarVis(QWidget):
         else:
             return 1
 
-    def get_volumetric_data(self, chopping_factor):
-        if self.contour_type == "total":
-            volumetric_data = self.chgcar_data[self.chg_file_path].chop(
-                self.chgcar_data[self.chg_file_path].all_numbers[0],
-                chopping_factor
-            )
-        elif self.contour_type == "spin":
-            volumetric_data = self.chgcar_data[self.chg_file_path].chop(
-                self.chgcar_data[self.chg_file_path].all_numbers[1],
-                chopping_factor
-            )
-        elif self.contour_type == "alfa":
-            if self.chgcar_data[self.chg_file_path].alfa is None:
-                self.chgcar_data[self.chg_file_path].calc_alfa_beta()
-                volumetric_data = self.chgcar_data[self.chg_file_path].chop(
-                    self.chgcar_data[self.chg_file_path].alfa,
-                    chopping_factor
-                )
+    def get_volumetric_data(self, chopping_factor, density_type=None):
+        data = self.chgcar_data.get(getattr(self, "chg_file_path", None))
+        if data is None:
+            return None
+        density_type = density_type or self.contour_type
+        if density_type == "total":
+            grid = data.all_numbers[0]
+        elif density_type in ("spin", "alfa", "beta") and len(data.all_numbers) > 1:
+            if density_type == "spin":
+                grid = data.all_numbers[1]
             else:
-                volumetric_data = self.chgcar_data[self.chg_file_path].alfa
-
-        elif self.contour_type == "beta":
-            if self.chgcar_data[self.chg_file_path].beta is None:
-                self.chgcar_data[self.chg_file_path].calc_alfa_beta()
-                volumetric_data = self.chgcar_data[self.chg_file_path].chop(
-                    self.chgcar_data[self.chg_file_path].beta,
-                    chopping_factor
-                )
-            else:
-                volumetric_data = self.chgcar_data[self.chg_file_path].beta
-
-        if volumetric_data is None:
-            print("Invalid contour type")
-            return
+                if data.alfa is None or data.beta is None:
+                    data.calc_alfa_beta()
+                grid = getattr(data, density_type)
         else:
-            return volumetric_data
+            return None
+        return data.chop(grid, chopping_factor)
 
     #@profile
     def add_contours(self):
         """ creates the isosurface contours from charge density data """
 
-        if self.chgcar_data[self.chg_file_path] == None:
+        if self.chgcar_data.get(self.chg_file_path) is None:
             # if no charge data was loaded, print message
             print("no data was found")
             return
@@ -588,6 +576,8 @@ class ChgcarVis(QWidget):
             self.chg_plotter.remove_actor(self.current_contour_actor)
 
         volumetric_data = self.get_volumetric_data(chopping_factor)
+        if volumetric_data is None:
+            return
 
         max_val = np.max(volumetric_data)
         min_val = np.min(volumetric_data)
@@ -680,7 +670,9 @@ class ChgcarVis(QWidget):
         """ removes the contours from plotter """
 
         actor = self.current_contour_actor
-        self.chg_plotter.remove_actor(actor)
+        if actor is not None:
+            self.chg_plotter.remove_actor(actor)
+            self.current_contour_actor = None
         print('cleared')
 
     def select_chg_file(self):
@@ -742,7 +734,9 @@ class ChgcarVis(QWidget):
         """
         if density_type not in ['total', 'spin', 'alfa', 'beta']:
             return
-        data = self.get_volumetric_data(1)
+        data = self.get_volumetric_data(1, density_type)
+        if data is None or self.box_widget is None:
+            return
 
         x_start, x_stop, y_start, y_stop, z_start, z_stop = [x if x >= 0 else 0 for x in self.box_bounds]
         box_min = np.array([x_start, y_start, z_start])
@@ -754,17 +748,25 @@ class ChgcarVis(QWidget):
         x_max, y_max, z_max = [min(v, l) for v, l in zip(grid_max, [x_max, y_max, z_max])]
 
         data[x_min: x_max, y_min: y_max, z_min: z_max] *= factor
+        self.chgcar_data[self.chg_file_path].alfa = None
+        self.chgcar_data[self.chg_file_path].beta = None
         if add_contours:
             self.add_contours()
 
     def flip_spin_density(self):
         """ flip spin density in a box defined by a box bounds."""
+        if len(self.chgcar_data[self.chg_file_path].all_numbers) < 2:
+            return
         self.change_charge_density('spin', -1)
 
     def remove_density(self):
         """ remove total and spin density from a box defined by a box bounds."""
+        if self.box_widget is None:
+            return
         self.change_charge_density('total', 0, add_contours=False)
-        self.change_charge_density('spin', 0)
+        if len(self.chgcar_data[self.chg_file_path].all_numbers) > 1:
+            self.change_charge_density('spin', 0, add_contours=False)
+        self.add_contours()
 
     def matrix_to_ase_matrix(self, matrix):
         x = matrix[0]
@@ -782,20 +784,22 @@ class ChgcarVis(QWidget):
         y = matrix[1]
         x = matrix[2]
         total_supercell = np.tile(self.chgcar_data[self.chg_file_path].all_numbers[0], (z, y, x))
-        spin_supercell = np.tile(self.chgcar_data[self.chg_file_path].all_numbers[1], (z, y, x))
-        self.chgcar_data[self.chg_file_path].all_numbers = [total_supercell, spin_supercell]
+        grids = [total_supercell]
+        if len(self.chgcar_data[self.chg_file_path].all_numbers) > 1:
+            grids.append(np.tile(self.chgcar_data[self.chg_file_path].all_numbers[1], (z, y, x)))
+        self.chgcar_data[self.chg_file_path].all_numbers = grids
+        self.chgcar_data[self.chg_file_path].alfa = None
+        self.chgcar_data[self.chg_file_path].beta = None
 
         multiplication = x * y * z
         aug_dict, aug_leftovers = self.chgcar_data[self.chg_file_path].read_augmentation(self.chgcar_data[self.chg_file_path].aug)
-        aug_diff_dict, aug_diff_leftovers = self.chgcar_data[self.chg_file_path].read_augmentation(self.chgcar_data[self.chg_file_path].aug_diff)
-
         new_aug_dict, new_aug_leftovers = self.chgcar_data[self.chg_file_path].tile_dict_and_list(aug_dict, aug_leftovers, multiplication)
-        new_aug_diff_dict, new_aug_diff_leftovers = self.chgcar_data[self.chg_file_path].tile_dict_and_list(aug_diff_dict, aug_diff_leftovers, multiplication)
-
         new_aug = self.chgcar_data[self.chg_file_path].rebuild_string(new_aug_dict, new_aug_leftovers)
-        new_aug_diff = self.chgcar_data[self.chg_file_path].rebuild_string(new_aug_diff_dict, new_aug_diff_leftovers)
         self.chgcar_data[self.chg_file_path].aug = new_aug
-        self.chgcar_data[self.chg_file_path].aug_diff = new_aug_diff
+        if len(grids) > 1 and self.chgcar_data[self.chg_file_path].aug_diff:
+            aug_diff_dict, aug_diff_leftovers = self.chgcar_data[self.chg_file_path].read_augmentation(self.chgcar_data[self.chg_file_path].aug_diff)
+            new_aug_diff_dict, new_aug_diff_leftovers = self.chgcar_data[self.chg_file_path].tile_dict_and_list(aug_diff_dict, aug_diff_leftovers, multiplication)
+            self.chgcar_data[self.chg_file_path].aug_diff = self.chgcar_data[self.chg_file_path].rebuild_string(new_aug_diff_dict, new_aug_diff_leftovers)
         print("done")
 
     def make_atoms_supercell(self, matrix, write_buffer=True):
@@ -878,23 +882,18 @@ class ChgcarVis(QWidget):
 
         idx = index + 1
         if self.chg_file_path in self.chgcar_data:
-            aug_dict, aug_leftovers = self.chgcar_data[self.chg_file_path].read_augmentation(self.chgcar_data[self.chg_file_path].aug)
-            aug_diff_dict, aug_diff_leftovers = self.chgcar_data[self.chg_file_path].read_augmentation(self.chgcar_data[self.chg_file_path].aug_diff)
-
-            del aug_dict[idx]
-            del aug_leftovers[index]
-            del aug_diff_dict[idx]
-
             def new_dict(old_dict):
                 return {i + 1: v for i, (_, v) in enumerate(sorted(old_dict.items()))}
-
-            new_aug_dict = new_dict(aug_dict)
-            new_aug_diff_dict = new_dict(aug_diff_dict)
-            new_aug = self.chgcar_data[self.chg_file_path].rebuild_string(new_aug_dict, aug_leftovers)
-            new_aug_diff = self.chgcar_data[self.chg_file_path].rebuild_string(new_aug_diff_dict, aug_diff_leftovers)
-
-            self.chgcar_data[self.chg_file_path].aug = new_aug
-            self.chgcar_data[self.chg_file_path].aug_diff = new_aug_diff
+            data = self.chgcar_data[self.chg_file_path]
+            for attribute in ("aug", "aug_diff"):
+                augmentation = getattr(data, attribute)
+                if not augmentation:
+                    continue
+                aug_dict, leftovers = data.read_augmentation(augmentation)
+                aug_dict.pop(idx, None)
+                if index < len(leftovers):
+                    del leftovers[index]
+                setattr(data, attribute, data.rebuild_string(new_dict(aug_dict), leftovers))
 
     def create_header_when_deleted(self):
         if self.chg_file_path in self.chgcar_data:
@@ -915,7 +914,8 @@ class ChgcarVis(QWidget):
             self.chgcar_data[self.chg_file_path].save_all_file(
                 file_path,
                 [self.chgcar_data[self.chg_file_path].all_numbers[0]],
-                [self.chgcar_data[self.chg_file_path].all_numbers[1]],
+                ([self.chgcar_data[self.chg_file_path].all_numbers[1]]
+                 if len(self.chgcar_data[self.chg_file_path].all_numbers) > 1 else None),
                 self.chgcar_data[self.chg_file_path].aug,
                 self.chgcar_data[self.chg_file_path].aug_diff
             )
