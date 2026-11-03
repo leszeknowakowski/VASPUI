@@ -495,12 +495,13 @@ class ChgcarVis(QWidget):
     def _on_chgcar_finished(self, thread, init):
         self.chgcar_data[thread.file_path] = thread
 
-        has_spin = len(thread.all_numbers) > 1
-        for channel in ("spin", "alfa", "beta"):
-            self.spin_buttons[channel].setEnabled(has_spin)
-        self.flip_spin_button.setEnabled(has_spin)
-        if not has_spin and self.contour_type in ("spin", "alfa", "beta"):
-            self.contour_type = "total"
+        if thread.file_path == self.chg_file_path:
+            has_spin = len(thread.all_numbers) > 1
+            for channel in ("spin", "alfa", "beta"):
+                self.spin_buttons[channel].setEnabled(has_spin)
+            self.flip_spin_button.setEnabled(has_spin)
+            if not has_spin and self.contour_type in ("spin", "alfa", "beta"):
+                self.contour_type = "total"
 
         if init:
             self.add_contours()
@@ -1133,6 +1134,8 @@ class VolumetricDataEditingWindow(QWidget):
         super().__init__()
         self.parent = chgcar_widget
         self.vol_editing_paths = []
+        self.operations_queue = []
+        self.pending_paths = []
         self.setWindowTitle("File Math Processor")
         self.resize(600, 400)
 
@@ -1190,30 +1193,33 @@ class VolumetricDataEditingWindow(QWidget):
     import numpy as np
 
     def process(self):
-        if self.parent.chgcar_data == {}:
+        if getattr(self.parent, "chg_file_path", None) not in self.parent.chgcar_data:
             print("No main CHGCAR loaded!")
             return
 
         self.operations_queue = []  # store (operation, filepath)
-        self.pending_loads = 0
 
         for row in self.rows:
             op, path = row.get_data()
             if path:
                 self.operations_queue.append((op, path))
-                self.pending_loads += 1
-                self.parent.create_chgcar_data(path, init=False)
 
-        if self.pending_loads == 0:
+        if not self.operations_queue:
             print("Nothing to load")
             return
+
+        self.pending_paths = [path for _, path in self.operations_queue]
+        for path in tuple(self.pending_paths):
+            self.parent.create_chgcar_data(path, init=False)
 
         print("Loading files asynchronously...")
 
     def notify_chgcar_loaded(self, path):
-        self.pending_loads -= 1
+        if path not in self.pending_paths:
+            return
+        self.pending_paths.remove(path)
 
-        if self.pending_loads == 0:
+        if not self.pending_paths:
             print("All files loaded — performing math")
             self.perform_math()
 
@@ -1221,13 +1227,13 @@ class VolumetricDataEditingWindow(QWidget):
         main_chg = self.parent.chgcar_data[self.parent.chg_file_path]
 
         main_total = main_chg.all_numbers[0]
-        main_spin = main_chg.all_numbers[1]
+        main_spin = main_chg.all_numbers[1] if len(main_chg.all_numbers) > 1 else None
 
         for op, path in self.operations_queue:
             thread = self.parent.chgcar_data[path]
 
             grid_total = thread.all_numbers[0]
-            grid_spin = thread.all_numbers[1]
+            grid_spin = thread.all_numbers[1] if len(thread.all_numbers) > 1 else None
 
             if grid_total.shape != main_total.shape:
                 print("Shape mismatch:", path)
@@ -1237,7 +1243,16 @@ class VolumetricDataEditingWindow(QWidget):
             self.apply_operation(main_total, grid_total, op)
 
             # ---- SPIN CHANNEL ----
-            self.apply_operation(main_spin, grid_spin, op)
+            if main_spin is not None and grid_spin is not None:
+                if grid_spin.shape == main_spin.shape:
+                    self.apply_operation(main_spin, grid_spin, op)
+                else:
+                    print("Spin shape mismatch:", path)
+            elif main_spin is not None or grid_spin is not None:
+                print("Skipping spin channel; it is missing from one CHGCAR:", path)
+
+        main_chg.alfa = None
+        main_chg.beta = None
 
         # add contours
         self.parent.add_contours()
