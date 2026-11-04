@@ -504,9 +504,9 @@ class _CoefficientsDialog(QtWidgets.QDialog):
                 item.setData(QtCore.Qt.UserRole, row["coefficient"])
                 item.setToolTip(self._coefficient_tooltip(row))
                 if row["coefficient"] < 0:
-                    item.setForeground(QtCore.Qt.darkBlue)
+                    item.setForeground(QtGui.QColor("#83b9d9"))
                 elif row["coefficient"] > 0:
-                    item.setForeground(QtCore.Qt.darkRed)
+                    item.setForeground(QtGui.QColor("#c77b7b"))
                 self._highlight_if_selected(item, row["abs_coefficient"])
                 self.table.setItem(row_index, column_index, item)
 
