@@ -96,6 +96,14 @@ class CHGCARParser(QThread):
     def update_label(self, text):
         self.change_label.emit(text)
 
+    def create_new_header(self, stream):
+        """Use the edited POSCAR structure for subsequent CHGCAR writes."""
+        from ase.io import read
+
+        stream.seek(0)
+        self.atoms = read(stream, format='vasp')
+        self._unit_cell_vectors = self.atoms.cell[:]
+
     def calc_alfa_beta(self):
         """calculate alfa and beta density
         Returns:

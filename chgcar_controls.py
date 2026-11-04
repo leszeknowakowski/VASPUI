@@ -508,7 +508,8 @@ class ChgcarVis(QWidget):
         self.close_progress_window()
         self._after_reading()
 
-        thread.deleteLater()
+        # chgcar_data keeps using this QThread as the loaded CHGCAR model.
+        # Deleting its Qt object here leaves a dead wrapper in that dictionary.
         self.chg_threads.remove(thread)
 
         if hasattr(self, "volume_editing_window"):
