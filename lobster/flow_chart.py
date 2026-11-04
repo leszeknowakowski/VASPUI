@@ -434,68 +434,6 @@ class _FlowChartPanel(QtWidgets.QWidget):
         self.plot.enableAutoRange()
 
 
-class _FrozenFirstColumnTable(QtWidgets.QTableWidget):
-    def __init__(self):
-        super().__init__()
-        self.frozen_view = QtWidgets.QTableView(self)
-        self.frozen_view.setModel(self.model())
-        self.frozen_view.setSelectionModel(self.selectionModel())
-        self.frozen_view.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.frozen_view.setFrameShape(QtWidgets.QFrame.NoFrame)
-        self.frozen_view.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self.frozen_view.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self.frozen_view.verticalHeader().hide()
-        self.frozen_view.horizontalHeader().setDefaultAlignment(
-            QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
-        )
-        self.frozen_view.setAlternatingRowColors(True)
-        self.frozen_view.setSelectionBehavior(self.selectionBehavior())
-        self.frozen_view.setSelectionMode(self.selectionMode())
-        self.frozen_view.setVerticalScrollMode(self.verticalScrollMode())
-
-        self.verticalScrollBar().valueChanged.connect(
-            self.frozen_view.verticalScrollBar().setValue
-        )
-        self.frozen_view.verticalScrollBar().valueChanged.connect(
-            self.verticalScrollBar().setValue
-        )
-        self.horizontalHeader().sectionResized.connect(self._update_frozen_geometry)
-        self.verticalHeader().sectionResized.connect(self._sync_row_height)
-        self.frozen_view.horizontalHeader().sectionClicked.connect(self._sort_frozen_column)
-
-    def update_frozen_column(self):
-        for column in range(self.columnCount()):
-            self.frozen_view.setColumnHidden(column, column != 0)
-        self.frozen_view.horizontalHeader().setFixedHeight(self.horizontalHeader().height())
-        self._update_frozen_geometry()
-        self.frozen_view.raise_()
-
-    def _sync_row_height(self, row, old_height, new_height):
-        self.frozen_view.setRowHeight(row, new_height)
-
-    def _sort_frozen_column(self, column):
-        order = self.horizontalHeader().sortIndicatorOrder()
-        if self.horizontalHeader().sortIndicatorSection() == column:
-            order = (QtCore.Qt.DescendingOrder if order == QtCore.Qt.AscendingOrder
-                     else QtCore.Qt.AscendingOrder)
-        self.sortByColumn(column, order)
-
-    def _update_frozen_geometry(self, *args):
-        if not self.columnCount():
-            return
-        self.frozen_view.setColumnWidth(0, self.columnWidth(0))
-        self.frozen_view.setGeometry(
-            self.verticalHeader().width() + self.frameWidth(),
-            self.frameWidth(),
-            self.columnWidth(0),
-            self.horizontalHeader().height() + self.viewport().height(),
-        )
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._update_frozen_geometry()
-
-
 class _CoefficientsDialog(QtWidgets.QDialog):
     def __init__(self, parent, rows, threshold: float):
         super().__init__(parent)
@@ -507,7 +445,7 @@ class _CoefficientsDialog(QtWidgets.QDialog):
 
         layout = QtWidgets.QVBoxLayout(self)
 
-        self.table = _FrozenFirstColumnTable()
+        self.table = QtWidgets.QTableWidget()
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setDefaultAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
@@ -566,15 +504,14 @@ class _CoefficientsDialog(QtWidgets.QDialog):
                 item.setData(QtCore.Qt.UserRole, row["coefficient"])
                 item.setToolTip(self._coefficient_tooltip(row))
                 if row["coefficient"] < 0:
-                    item.setForeground(QtGui.QColor("#83b9d9"))
+                    item.setForeground(QtCore.Qt.darkBlue)
                 elif row["coefficient"] > 0:
-                    item.setForeground(QtGui.QColor("#c77b7b"))
+                    item.setForeground(QtCore.Qt.darkRed)
                 self._highlight_if_selected(item, row["abs_coefficient"])
                 self.table.setItem(row_index, column_index, item)
 
         self.table.setSortingEnabled(True)
         self.table.resizeColumnsToContents()
-        self.table.update_frozen_column()
 
     @staticmethod
     def _mo_header(row):
