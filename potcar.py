@@ -19,7 +19,6 @@ class Potcar_tab(QWidget):
         self.layout.setAlignment(QtCore.Qt.AlignTop)
         self.structure_variable_control = structure_variable_control
         self.structure_plot_widget = self.structure_variable_control.structure_control_widget.structure_plot_widget
-        self.data = self.structure_plot_widget.data
 
         self.label = QLabel("Click to create POTCAR")
         self.button = QPushButton("Choose POTCAR files directory")
@@ -31,11 +30,15 @@ class Potcar_tab(QWidget):
         self.setLayout(self.layout)
 
     def generate_potcar(self):
+        data = self.structure_plot_widget.data
         # atoms names + suffixes
-        atoms_list =  [a + b for a, b in zip(self.data.symbols, self.data.suffixes)]
+        atoms_list = [a + b for a, b in zip(data.symbols, data.suffixes)]
+        if not atoms_list:
+            QMessageBox.warning(self, "No atoms", "There are no atoms to create a POTCAR for.")
+            return
 
         # counts names in a row, preperaling a list as in POSCAR
-        self.symbols_as_in_poscar, self.counts = self.data.poscar.atom_lines_as_in_poscar(atoms_list)
+        self.symbols_as_in_poscar, self.counts = data.poscar.atom_lines_as_in_poscar(atoms_list)
 
         # check for duplicates - if exists, POTCAR can be written, but VASP will not run so it's useless
         if len(self.symbols_as_in_poscar) != len(set(self.symbols_as_in_poscar)):
@@ -44,7 +47,7 @@ class Potcar_tab(QWidget):
                                  Sort elements first (by clicking \"sort\" on structure tab)")
             return
         else:
-            self.mendelev_symbols_as_in_poscar = self.data.poscar.mendelev_symbols(self.symbols_as_in_poscar)
+            self.mendelev_symbols_as_in_poscar = data.poscar.mendelev_symbols(self.symbols_as_in_poscar)
 
             if hasattr(AppConfig, "potcar_dir"):
                 potcar_dir_base = AppConfig.potcar_dir
