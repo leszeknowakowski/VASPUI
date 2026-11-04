@@ -329,7 +329,8 @@ class CHGCARParser(QThread):
                     continue  # Write only the last image for CHGCAR
                 aiv.write_vasp(fd,
                                self.atoms,
-                               direct=True)
+                               direct=True,
+                               ignore_constraints=True)
                 fd.write('\n')
                 for dim in chg.shape:
                     fd.write(' %4i' % dim)

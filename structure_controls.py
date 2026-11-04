@@ -1157,21 +1157,29 @@ class StructureControlsWidget(QWidget):
         self.self.structure_plot_widget.data.constrains[row] = constraints
 
     def delete_row(self, row):
-        import inspect
-        atoms = len(self.structure_plot_widget.data.atoms_symb_and_num)
         data = self.structure_plot_widget.data
-        values = [value for name, value in inspect.getmembers(data)
-                  if type(value) == list and len(value) == atoms]
-        properties = [name for name, value in inspect.getmembers(data)
-                  if type(value) == list and len(value) == atoms]
-        for value, property in zip(values, properties):
-            value.pop(row)
-            setattr(data, property, value)
+        atoms = len(data.atoms_symb_and_num)
+        # A geometry or energy list can have the same length as the atom list.
+        # Only these fields contain one entry per atom.
+        atom_fields = (
+            'atoms_symb_and_num', 'list_atomic_symbols', 'init_coordinates',
+            'coordinates', 'symbols', 'constrains', 'all_constrains',
+            'suffixes', 'nums', 'magmoms', 'data_up', 'data_down',
+            'stripped_symbols', 'mags',
+        )
+        for name in atom_fields:
+            values = getattr(data, name, None)
+            if isinstance(values, list) and len(values) == atoms:
+                values.pop(row)
         self.structure_plot_widget.atom_colors.pop(row)
         if hasattr(self.structure_plot_widget.data, 'outcar_data'):
             outcar_data = self.structure_plot_widget.data.outcar_data
             for mag in outcar_data.magnetizations:
-                mag.pop(row)
+                if len(mag) == atoms:
+                    mag.pop(row)
+            for forces in outcar_data.forces:
+                if len(forces) == atoms:
+                    forces.pop(row)
 
         for geo in self.structure_plot_widget.data.outcar_coordinates:
             geo.pop(row) # delete atom from all geometries
