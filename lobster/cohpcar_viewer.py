@@ -347,6 +347,7 @@ class CohpcarPlotWindow(QtWidgets.QMainWindow):
         self.default_dir = Path(default_dir or Path.cwd())
         self.selected_bond_key = selected_bond_key
         self.selected_interactions = list(selected_interactions or [])
+        self.selected_by_bond: dict[str, list[str]] = {}
         self.interaction_boxes = []
         self.updating_checkboxes = False
         self.plot_entries: list[CohpPlotEntry] = []
@@ -395,9 +396,11 @@ class CohpcarPlotWindow(QtWidgets.QMainWindow):
         top_controls.addWidget(self.color_combo)
 
         self.plot_button = QtWidgets.QPushButton("Add plot")
+        self.plot_button.setToolTip("Add checked interactions across all bonds and their spin-resolved sum")
         top_controls.addWidget(self.plot_button)
 
         self.clear_selection_button = QtWidgets.QPushButton("Clear selection")
+        self.clear_selection_button.setToolTip("Clear checkbox selections across all bonds")
         top_controls.addWidget(self.clear_selection_button)
 
         self.clear_button = QtWidgets.QPushButton("Clear plots")
@@ -554,6 +557,7 @@ class CohpcarPlotWindow(QtWidgets.QMainWindow):
             self.load_file(filename)
 
     def load_file(self, filename, selected_bond_key=None, selected_interactions=None):
+        self.selected_by_bond = {}
         try:
             self.dataset = CohpcarDataset(filename)
         except Exception as error:
@@ -594,6 +598,8 @@ class CohpcarPlotWindow(QtWidgets.QMainWindow):
         selected_index = self._bond_index(self.selected_bond_key)
         self.bond_combo.setCurrentIndex(selected_index)
         self.bond_combo.blockSignals(False)
+        bond_key = self.current_bond_key()
+        self.selected_by_bond[str(bond_key)] = self._resolved_selected_interactions(bond_key)
         self._populate_interactions()
 
     def _bond_index(self, bond_key):
@@ -607,7 +613,6 @@ class CohpcarPlotWindow(QtWidgets.QMainWindow):
         return 0
 
     def _bond_changed(self):
-        self.selected_interactions = []
         self._populate_interactions()
 
     def _populate_interactions(self):
@@ -621,7 +626,8 @@ class CohpcarPlotWindow(QtWidgets.QMainWindow):
         if bond_key is None:
             return
 
-        selected_keys = self._resolved_selected_interactions(bond_key)
+        selected_keys = self.selected_by_bond.get(str(bond_key), [])
+        self.selected_interactions = list(selected_keys)
         self.updating_checkboxes = True
 
         for interaction_key in self.dataset.interaction_keys(bond_key):
@@ -633,9 +639,6 @@ class CohpcarPlotWindow(QtWidgets.QMainWindow):
             box.stateChanged.connect(self.plot_selected)
             self.interaction_layout.addWidget(box)
             self.interaction_boxes.append(box)
-
-        if not selected_keys and self.interaction_boxes:
-            self.interaction_boxes[0].setChecked(True)
 
         self.updating_checkboxes = False
         self._update_selection_info()
@@ -676,6 +679,9 @@ class CohpcarPlotWindow(QtWidgets.QMainWindow):
             return
 
         self.selected_interactions = self.selected_interaction_keys()
+        bond_key = self.current_bond_key()
+        if bond_key is not None:
+            self.selected_by_bond[str(bond_key)] = list(self.selected_interactions)
         self._update_selection_info()
 
     def clear_selection(self):
@@ -684,7 +690,22 @@ class CohpcarPlotWindow(QtWidgets.QMainWindow):
             box.setChecked(False)
         self.updating_checkboxes = False
         self.selected_interactions = []
+        self.selected_by_bond = {}
         self._update_selection_info()
+
+    def selected_plot_entries(self):
+        """Collect the retained checkbox selections across all bonds."""
+        entries = []
+        if self.dataset is None:
+            return entries
+        for bond_key in self.dataset.bond_keys:
+            for key in self.selected_by_bond.get(str(bond_key), []):
+                resolved = self.dataset.resolve_interaction_key(bond_key, key)
+                if resolved is not None:
+                    entry = CohpPlotEntry(str(bond_key), resolved)
+                    if entry not in entries:
+                        entries.append(entry)
+        return entries
 
     def add_selected_to_plots(self):
         if self.updating_checkboxes:
@@ -694,24 +715,14 @@ class CohpcarPlotWindow(QtWidgets.QMainWindow):
             self.info_label.setText("No COHPCAR data loaded")
             return
 
-        bond_key = self.current_bond_key()
-        selected_keys = self.selected_interaction_keys()
+        selection_entries = self.selected_plot_entries()
 
-        if bond_key is None or not selected_keys:
+        if not selection_entries:
             self.info_label.setText("No interactions selected")
             return
 
         added_count = 0
-        selection_entries = []
-        for interaction_key in selected_keys:
-            resolved_key = self.dataset.resolve_interaction_key(
-                bond_key,
-                interaction_key,
-            )
-            if resolved_key is None:
-                continue
-            entry = CohpPlotEntry(str(bond_key), resolved_key)
-            selection_entries.append(entry)
+        for entry in selection_entries:
             if entry in self.plot_entries:
                 continue
             self.plot_entries.append(entry)
@@ -906,6 +917,7 @@ class CohpcarPlotWindow(QtWidgets.QMainWindow):
 
         bond_key = self.current_bond_key()
         selected_count = len(self.selected_interaction_keys())
+        total_selected = len(self.selected_plot_entries())
         active_count = len(self.plot_entries)
         if bond_key is None:
             self.info_label.setText(f"Active plots: {active_count}")
@@ -913,7 +925,8 @@ class CohpcarPlotWindow(QtWidgets.QMainWindow):
 
         self.info_label.setText(
             f"{self.dataset.bond_display_label(bond_key)}    "
-            f"Selected: {selected_count}    Active plots: {active_count}"
+            f"Selected on this bond: {selected_count}    "
+            f"Selected across all bonds: {total_selected}    Active plots: {active_count}"
         )
 
     def _colors_for_count(self, count):
