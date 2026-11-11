@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
+from pyqtgraph.graphicsItems.LegendItem import ItemSample
 
 try:
     from pymatgen.electronic_structure.core import Spin
@@ -50,6 +51,21 @@ class CohpBondMetadata:
 class CohpPlotEntry:
     bond_key: str
     interaction_key: str
+
+
+class SpinPairSample(ItemSample):
+    """Show the two spin pens beside a single interaction label."""
+
+    def __init__(self, items):
+        super().__init__(next(iter(items.values())))
+        self.spin_items = items
+        self.setToolTip("Top line: spin up; bottom line: spin down")
+
+    def paint(self, painter, *args):
+        for spin, y in ((Spin.up, 6), (Spin.down, 15)):
+            if spin in self.spin_items:
+                painter.setPen(self.spin_items[spin].opts["pen"])
+                painter.drawLine(0, y, 20, y)
 
 
 class CohpcarDataset:
@@ -185,6 +201,85 @@ class CohpcarDataset:
 
         return self.orb_res_cohp[bond_key][interaction_key]["COHP"]
 
+    def interaction_sites(self, bond_key, interaction_key):
+        """Read atom/orbital identities from the original COHPCAR header labels."""
+        metadata = self._metadata_for_bond(bond_key)
+        if interaction_key == TOTAL_INTERACTION_KEY:
+            label = metadata.pair_label
+        else:
+            label = metadata.interaction_labels.get(interaction_key, "")
+        if "->" not in label:
+            return None
+        return tuple(self._split_atom_orbital(site) for site in label.split("->", 1))
+
+    @staticmethod
+    def compact_orbital_labels(orbitals):
+        """Collapse complete shells, preserving principal numbers and partial shells."""
+        shells = {}
+        for orbital in sorted(set(orbitals)):
+            match = re.fullmatch(r"(\d*[spdf])(.*)", orbital)
+            if match is None:
+                shells.setdefault(orbital, []).append(orbital)
+            else:
+                shells.setdefault(match[1], []).append(orbital)
+        components = {
+            "s": {""},
+            "p": {"x", "y", "z"},
+            "d": {"xy", "yz", "z2", "xz", "x2-y2"},
+            "f": {"y(3x2-y2)", "xyz", "yz2", "z3", "xz2", "z(x2-y2)", "x(x2-3y2)"},
+        }
+        labels = []
+        ordered_shells = sorted(
+            shells,
+            key=lambda shell: (
+                "spdf".find(shell[-1]) if shell[-1] in "spdf" else 4,
+                shell,
+            ),
+        )
+        for shell in ordered_shells:
+            values = shells[shell]
+            suffixes = {value[len(shell):].replace("_", "").replace("^", "") for value in values}
+            if shell[-1] in components and suffixes == components[shell[-1]]:
+                labels.append(shell)
+            else:
+                labels.extend(values)
+        return " ".join(labels)
+
+    def selection_label(self, entries):
+        """Factor only actual selected pairs; never imply unselected cross terms."""
+        bonds = {}
+        for entry in entries:
+            bonds.setdefault(entry.bond_key, []).append(entry)
+        labels = []
+        for bond_key, bond_entries in bonds.items():
+            rows = {}
+            for entry in bond_entries:
+                sites = self.interaction_sites(bond_key, entry.interaction_key)
+                if sites is None:
+                    labels.append(self.interaction_label(bond_key, entry.interaction_key))
+                    continue
+                (left_atom, left_orb), (right_atom, right_orb) = sites
+                if left_orb is None or right_orb is None:
+                    labels.append(f"{left_atom} ↔ {right_atom} (total)")
+                else:
+                    rows.setdefault((left_atom, right_atom), {}).setdefault(left_orb, set()).add(right_orb)
+
+            for (left_atom, right_atom), selected in rows.items():
+                available_left, available_right = set(), set()
+                for key in self.interaction_keys(bond_key):
+                    sites = self.interaction_sites(bond_key, key)
+                    if sites and sites[0][1] is not None and sites[1][1] is not None:
+                        available_left.add(sites[0][1])
+                        available_right.add(sites[1][1])
+                groups = {}
+                for left_orb, right_orbs in selected.items():
+                    groups.setdefault(frozenset(right_orbs), []).append(left_orb)
+                for right_orbs, left_orbs in groups.items():
+                    left_label = "" if len(available_left) > 1 and set(left_orbs) == available_left else self.compact_orbital_labels(left_orbs)
+                    right_label = "" if len(available_right) > 1 and right_orbs == available_right else self.compact_orbital_labels(right_orbs)
+                    labels.append(f"{left_atom} {left_label}".rstrip() + " ↔ " + f"{right_atom} {right_label}".rstrip())
+        return "Sum " + "; ".join(labels)
+
     def resolve_interaction_key(self, bond_key, interaction_key):
         if interaction_key == TOTAL_INTERACTION_KEY:
             return interaction_key if self._has_total_curve(bond_key) else None
@@ -231,7 +326,10 @@ class CohpcarPlotWindow(QtWidgets.QMainWindow):
     """Window for plotting COHPCAR total and orbital-resolved interactions."""
 
     PLOT_LINEWIDTH = 2.2
+    SUM_LINEWIDTH = 3.2
     SPIN_DOWN_ALPHA = 115
+    SUM_SPIN_UP_COLOR = "#808080"
+    SUM_SPIN_DOWN_COLOR = "#d3d3d3"
     PLOT_BACKGROUND = "#11161c"
     AXIS_COLOR = "#dce5ee"
     GRID_COLOR = "#405064"
@@ -252,9 +350,9 @@ class CohpcarPlotWindow(QtWidgets.QMainWindow):
         self.interaction_boxes = []
         self.updating_checkboxes = False
         self.plot_entries: list[CohpPlotEntry] = []
+        self.selection_sums: list[tuple[CohpPlotEntry, ...]] = []
+        self.plot_legends = []
         self.region = None
-        self.spin_up_legend = None
-        self.spin_down_legend = None
         self.current_region = (-5.0, 5.0)
         self.updating_region = False
 
@@ -328,6 +426,9 @@ class CohpcarPlotWindow(QtWidgets.QMainWindow):
         left_layout = QtWidgets.QVBoxLayout(left_panel)
         left_layout.addWidget(QtWidgets.QLabel("Interactions"))
         left_layout.addWidget(interaction_scroll)
+        self.export_pdf_button = QtWidgets.QPushButton("Export PDF")
+        self.export_pdf_button.setToolTip("Export the bounded plot, including curves and legend")
+        left_layout.addWidget(self.export_pdf_button)
         splitter.addWidget(left_panel)
 
         self.plot_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
@@ -390,6 +491,13 @@ class CohpcarPlotWindow(QtWidgets.QMainWindow):
                 axis.setPen(pg.mkPen(self.AXIS_COLOR))
                 axis.setTextPen(pg.mkPen(self.AXIS_COLOR))
 
+            action_class = getattr(QtGui, "QAction", None) or QtWidgets.QAction
+            export_action = action_class("Export to PDF", plot_widget)
+            export_action.triggered.connect(
+                lambda checked=False, plot=plot_widget: self.export_to_pdf(plot)
+            )
+            plot_widget.getViewBox().menu.addAction(export_action)
+
         self.bounded_plot.sigRangeChanged.connect(self.update_region_from_bounded_plot)
         self._reset_plot_overlays()
 
@@ -400,6 +508,39 @@ class CohpcarPlotWindow(QtWidgets.QMainWindow):
         self.plot_button.clicked.connect(self.add_selected_to_plots)
         self.clear_selection_button.clicked.connect(self.clear_selection)
         self.clear_button.clicked.connect(self.clear_plots)
+        self.export_pdf_button.clicked.connect(lambda: self.export_to_pdf())
+
+    def export_to_pdf(self, plot_widget=None, filename=None):
+        """Export the current plot with the same vector PDF backend as LCFO DOS."""
+        plot_widget = self.bounded_plot if plot_widget is None else plot_widget
+        if not plot_widget.listDataItems():
+            self.info_label.setText("Add plots before exporting PDF")
+            return None
+
+        if filename is None:
+            plot_name = "full" if plot_widget is self.full_range_plot else "bounded"
+            filename, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self,
+                "Export COHPCAR plot to PDF",
+                str(self.default_dir / f"COHPCAR_{plot_name}.pdf"),
+                "PDF Files (*.pdf);;All Files (*)",
+            )
+        if not filename:
+            return None
+
+        output_path = Path(filename)
+        if output_path.suffix.lower() != ".pdf":
+            output_path = Path(str(output_path) + ".pdf")
+        try:
+            from dos_plot_widget import PDFExporter
+
+            PDFExporter(plot_widget.getPlotItem()).export(filename=str(output_path))
+        except Exception as error:
+            QtWidgets.QMessageBox.warning(self, "PDF export failed", str(error))
+            return None
+
+        self.info_label.setText(f"Exported PDF: {output_path}")
+        return output_path
 
     def open_file(self):
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -426,6 +567,7 @@ class CohpcarPlotWindow(QtWidgets.QMainWindow):
         self.selected_bond_key = selected_bond_key
         self.selected_interactions = list(selected_interactions or [])
         self.plot_entries = []
+        self.selection_sums = []
         self._populate_bonds()
 
         if selected_bond_key is not None and selected_interactions:
@@ -560,6 +702,7 @@ class CohpcarPlotWindow(QtWidgets.QMainWindow):
             return
 
         added_count = 0
+        selection_entries = []
         for interaction_key in selected_keys:
             resolved_key = self.dataset.resolve_interaction_key(
                 bond_key,
@@ -568,10 +711,17 @@ class CohpcarPlotWindow(QtWidgets.QMainWindow):
             if resolved_key is None:
                 continue
             entry = CohpPlotEntry(str(bond_key), resolved_key)
+            selection_entries.append(entry)
             if entry in self.plot_entries:
                 continue
             self.plot_entries.append(entry)
             added_count += 1
+
+        selection = tuple(selection_entries)
+        if selection and not any(
+            set(selection) == set(existing) for existing in self.selection_sums
+        ):
+            self.selection_sums.append(selection)
 
         self.info_label.setText(
             f"Added {added_count} interaction(s). Active plots: {len(self.plot_entries)}"
@@ -580,6 +730,7 @@ class CohpcarPlotWindow(QtWidgets.QMainWindow):
 
     def clear_plots(self):
         self.plot_entries = []
+        self.selection_sums = []
         self.redraw_active_plots()
         self._update_selection_info()
 
@@ -607,6 +758,26 @@ class CohpcarPlotWindow(QtWidgets.QMainWindow):
         for index, entry in enumerate(valid_entries):
             self._plot_entry(entry, colors[index])
 
+        for selection in self.selection_sums:
+            curves = {}
+            for entry in selection:
+                if entry not in valid_entries:
+                    continue
+                for spin, values in self.dataset.interaction_curves(
+                    entry.bond_key, entry.interaction_key
+                ).items():
+                    if spin not in curves:
+                        curves[spin] = np.array(values, dtype=float, copy=True)
+                    else:
+                        curves[spin] += values
+            self._plot_interaction(
+                curves,
+                self.dataset.selection_label(selection),
+                self.SUM_SPIN_UP_COLOR,
+                down_color=self.SUM_SPIN_DOWN_COLOR,
+                linewidth=self.SUM_LINEWIDTH,
+            )
+
         self.update_bounded_plot_y_range()
 
     def _plot_entry(self, entry, color):
@@ -617,44 +788,56 @@ class CohpcarPlotWindow(QtWidgets.QMainWindow):
         label = self._plot_entry_label(entry)
         self._plot_interaction(curves, label, color)
 
-    def _plot_interaction(self, curves, label, color):
+    def _plot_interaction(self, curves, label, color, down_color=None, linewidth=None):
         up_color = QtGui.QColor(color)
-        down_color = QtGui.QColor(color)
-        down_color.setAlpha(self.SPIN_DOWN_ALPHA)
+        if down_color is None:
+            down_color = QtGui.QColor(color)
+            down_color.setAlpha(self.SPIN_DOWN_ALPHA)
+        else:
+            down_color = QtGui.QColor(down_color)
 
         spin_specs = [
-            (Spin.up, up_color, self.spin_up_legend),
-            (Spin.down, down_color, self.spin_down_legend),
+            (Spin.up, up_color),
+            (Spin.down, down_color),
         ]
 
-        for spin, spin_color, legend in spin_specs:
+        plotted_items = [{}, {}]
+        for spin, spin_color in spin_specs:
             if spin not in curves:
                 continue
 
-            pen = pg.mkPen(spin_color, width=self.PLOT_LINEWIDTH)
+            pen = pg.mkPen(
+                spin_color,
+                width=self.PLOT_LINEWIDTH if linewidth is None else linewidth,
+            )
             pen.setCapStyle(QtCore.Qt.RoundCap)
             pen.setJoinStyle(QtCore.Qt.RoundJoin)
 
-            self.full_range_plot.plot(
-                np.asarray(curves[spin]),
-                self.dataset.energies,
-                pen=pen,
-            )
-            bounded_item = self.bounded_plot.plot(
-                np.asarray(curves[spin]),
-                self.dataset.energies,
-                pen=pen,
-            )
-            if legend is not None:
-                legend.addItem(bounded_item, label)
+            for plot_widget, items in zip(
+                (self.full_range_plot, self.bounded_plot), plotted_items
+            ):
+                item = plot_widget.plot(
+                    np.asarray(curves[spin]),
+                    self.dataset.energies,
+                    pen=pen,
+                )
+                items[spin] = item
+        for legend, items in zip(self.plot_legends, plotted_items):
+            if items:
+                legend.addItem(SpinPairSample(items), label)
 
     def _plot_entry_label(self, entry):
-        bond_label = self.dataset.bond_display_label(entry.bond_key)
+        sites = self.dataset.interaction_sites(entry.bond_key, entry.interaction_key)
+        if sites is not None:
+            label = " ↔ ".join(
+                f"{atom} {orbital or ''}".rstrip() for atom, orbital in sites
+            )
+            return label + (" (total)" if entry.interaction_key == TOTAL_INTERACTION_KEY else "")
         interaction_label = self.dataset.interaction_label(
             entry.bond_key,
             entry.interaction_key,
         )
-        return f"{bond_label} | {interaction_label}"
+        return interaction_label
 
     def _reset_plot_overlays(self):
         self._clear_plot_widget(self.full_range_plot)
@@ -678,12 +861,18 @@ class CohpcarPlotWindow(QtWidgets.QMainWindow):
         self.region.sigRegionChanged.connect(self.update_bounded_plot_y_range)
 
     def _create_legends(self):
-        self.spin_up_legend = self._make_legend((10, 10), "Spin up")
-        self.spin_down_legend = self._make_legend((270, 10), "Spin down")
+        for legend in self.plot_legends:
+            legend.clear()
+            if legend.scene() is not None:
+                legend.scene().removeItem(legend)
+        self.plot_legends = [
+            self._make_legend(plot_widget, (10, 10), "Spin ↑ / ↓ (top / bottom)")
+            for plot_widget in (self.full_range_plot, self.bounded_plot)
+        ]
 
-    def _make_legend(self, offset, title):
-        legend = pg.LegendItem(offset=offset)
-        legend.setParentItem(self.bounded_plot.getPlotItem())
+    def _make_legend(self, plot_widget, offset, title):
+        legend = pg.LegendItem(offset=offset, labelTextColor=self.AXIS_COLOR)
+        legend.setParentItem(plot_widget.getPlotItem())
         legend.setBrush(pg.mkBrush(17, 22, 28, 230))
         legend.setPen(pg.mkPen("#405064"))
         dummy = pg.PlotDataItem([], [], pen=pg.mkPen((0, 0, 0, 0)))

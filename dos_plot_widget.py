@@ -757,6 +757,8 @@ class PDFExporter(Exporter):
             painter.setRenderHint(QPainter.NonCosmeticDefaultPen, True)
             if QtCore.QT_VERSION >= 0x050D00:
                 painter.setRenderHint(QPainter.LosslessImageRendering, True)
+            # QGraphicsScene.render does not paint the view's background brush.
+            painter.fillRect(QRectF(self.getTargetRect()), self.background)
             self.getScene().render(painter,
                                    QRectF(self.getTargetRect()),
                                    QRectF(self.getSourceRect()))
