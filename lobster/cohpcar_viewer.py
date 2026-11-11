@@ -1,7 +1,10 @@
 import os
 import re
 import sys
+import warnings
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from html import escape
 from pathlib import Path
 
 import numpy as np
@@ -11,14 +14,14 @@ from pyqtgraph.graphicsItems.LegendItem import ItemSample
 
 try:
     from pymatgen.electronic_structure.core import Spin
-    from pymatgen.io.lobster.outputs import Cohpcar, get_orb_from_str
+    from pymatgen.io.lobster.outputs import Cohpcar, Icohplist, get_orb_from_str
 except ModuleNotFoundError:
     repo_root = Path(__file__).resolve().parents[1]
     third_party = repo_root / "third_party"
     if third_party.is_dir():
         sys.path.insert(0, str(third_party))
     from pymatgen.electronic_structure.core import Spin
-    from pymatgen.io.lobster.outputs import Cohpcar, get_orb_from_str
+    from pymatgen.io.lobster.outputs import Cohpcar, Icohplist, get_orb_from_str
 
 
 LOCAL_COHPCAR_FILENAME = "COHPCAR.lobster"
@@ -85,9 +88,61 @@ class CohpcarDataset:
             key for key in self.cohp_data.keys() if key != "average"
         ]
         self.metadata = self._read_header_metadata()
+        self.icohp_data = self._read_icohplist()
 
         if not self.bond_keys:
             raise ValueError(f"No bonds found in COHPCAR file: {filename}")
+
+    def _read_icohplist(self):
+        filename = self.filename.with_name(
+            self.filename.name.replace("COHPCAR", "ICOHPLIST", 1)
+            if "COHPCAR" in self.filename.name else "ICOHPLIST.lobster"
+        )
+        if not filename.is_file():
+            return {}
+        try:
+            return Icohplist(filename=str(filename)).icohplist
+        except Exception as error:
+            warnings.warn(f"Could not load optional ICOHP values from {filename}: {error}", stacklevel=2)
+            return {}
+
+    def interaction_icohp(self, bond_key, interaction_key):
+        """Return ICOHP at EF summed over the available spin channels."""
+        bond_data = getattr(self, "icohp_data", {}).get(str(bond_key))
+        if bond_data is None:
+            return None
+        length = self._metadata_for_bond(bond_key).length
+        if length is not None and not np.isclose(
+            bond_data.get("length", length), length, atol=1e-4, rtol=0
+        ):
+            return None
+        if interaction_key == TOTAL_INTERACTION_KEY:
+            values = bond_data.get("icohp", {})
+        else:
+            key = self._normalize_interaction_key(interaction_key)
+            orbital_data = next(
+                (data for candidate, data in (bond_data.get("orbitals") or {}).items()
+                 if self._normalize_interaction_key(candidate) == key),
+                {},
+            )
+            values = orbital_data.get("icohp", {})
+        if not values:
+            return None
+        value = sum(float(value) for value in values.values())
+        return value if np.isfinite(value) else None
+
+    def icohp_label(self, entries, summed=False):
+        if not getattr(self, "icohp_data", {}):
+            return ""
+        values = [self.interaction_icohp(entry.bond_key, entry.interaction_key) for entry in entries]
+        prefix = "Sum ICOHP" if summed else "ICOHP"
+        if not values or any(value is None for value in values):
+            return f" | {prefix}: N/A"
+        value = sum(values)
+        # Do not display negative zero after rounding to two decimals.
+        if abs(value) < 0.005:
+            value = 0.0
+        return f" | {prefix}: {value:.2f} eV"
 
     def _read_header_metadata(self):
         metadata: dict[str, CohpBondMetadata] = {}
@@ -278,7 +333,7 @@ class CohpcarDataset:
                     left_label = "" if len(available_left) > 1 and set(left_orbs) == available_left else self.compact_orbital_labels(left_orbs)
                     right_label = "" if len(available_right) > 1 and right_orbs == available_right else self.compact_orbital_labels(right_orbs)
                     labels.append(f"{left_atom} {left_label}".rstrip() + " ↔ " + f"{right_atom} {right_label}".rstrip())
-        return "Sum " + "; ".join(labels)
+        return "Sum " + "; ".join(labels) + self.icohp_label(entries, summed=True)
 
     def resolve_interaction_key(self, bond_key, interaction_key):
         if interaction_key == TOTAL_INTERACTION_KEY:
@@ -537,13 +592,58 @@ class CohpcarPlotWindow(QtWidgets.QMainWindow):
         try:
             from dos_plot_widget import PDFExporter
 
-            PDFExporter(plot_widget.getPlotItem()).export(filename=str(output_path))
+            with self._pdf_export_style(plot_widget):
+                PDFExporter(plot_widget.getPlotItem()).export(filename=str(output_path))
         except Exception as error:
             QtWidgets.QMessageBox.warning(self, "PDF export failed", str(error))
             return None
 
         self.info_label.setText(f"Exported PDF: {output_path}")
         return output_path
+
+    @contextmanager
+    def _pdf_export_style(self, plot_widget):
+        """Remove screen-only decoration and restore it even if export fails."""
+        plot = plot_widget.getPlotItem()
+        background = plot_widget.backgroundBrush()
+        axes = []
+        for axis_name in ("left", "bottom", "right", "top"):
+            axis = plot.getAxis(axis_name)
+            axes.append((axis, axis.grid, axis.pen(), axis.textPen(), dict(axis.labelStyle)))
+        title_options = dict(plot.titleLabel.opts)
+        legend = self.plot_legends[0 if plot_widget is self.full_range_plot else 1]
+        legend_brush, legend_pen = legend.brush(), legend.pen()
+        legend_labels = [(label, dict(label.opts)) for _, label in legend.items]
+        region_visible = self.region.isVisible() if self.region is not None else False
+        try:
+            plot_widget.setBackground(None)
+            for axis, *_ in axes:
+                axis.setGrid(False)
+                axis.setPen(pg.mkPen("#202020"))
+                axis.setTextPen(pg.mkPen("#202020"))
+            plot.titleLabel.setText(plot.titleLabel.text, color="#202020")
+            legend.setBrush(pg.mkBrush(None))
+            legend.setPen(pg.mkPen(None))
+            for label, _ in legend_labels:
+                label.setText(label.text, color="#202020")
+            if plot_widget is self.full_range_plot and self.region is not None:
+                self.region.hide()
+            yield
+        finally:
+            plot_widget.setBackground(background)
+            for axis, grid, pen, text_pen, label_style in axes:
+                axis.setGrid(grid)
+                axis.setPen(pen)
+                axis.setTextPen(text_pen)
+                axis.labelStyle = label_style
+                axis.label.setHtml(axis.labelString())
+            plot.titleLabel.setText(plot.titleLabel.text, **title_options)
+            legend.setBrush(legend_brush)
+            legend.setPen(legend_pen)
+            for label, options in legend_labels:
+                label.setText(label.text, **options)
+            if self.region is not None:
+                self.region.setVisible(region_visible)
 
     def open_file(self):
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -835,20 +935,26 @@ class CohpcarPlotWindow(QtWidgets.QMainWindow):
                 items[spin] = item
         for legend, items in zip(self.plot_legends, plotted_items):
             if items:
-                legend.addItem(SpinPairSample(items), label)
+                display_label = escape(label)
+                if label.startswith("Sum "):
+                    display_label = display_label.replace("; ", ";<br>")
+                    display_label = display_label.replace(" | Sum ICOHP:", "<br>Sum ICOHP:")
+                legend.addItem(SpinPairSample(items), display_label)
+                legend.items[-1][1].setToolTip(label)
 
     def _plot_entry_label(self, entry):
+        icohp_label = self.dataset.icohp_label([entry])
         sites = self.dataset.interaction_sites(entry.bond_key, entry.interaction_key)
         if sites is not None:
             label = " ↔ ".join(
                 f"{atom} {orbital or ''}".rstrip() for atom, orbital in sites
             )
-            return label + (" (total)" if entry.interaction_key == TOTAL_INTERACTION_KEY else "")
+            return label + (" (total)" if entry.interaction_key == TOTAL_INTERACTION_KEY else "") + icohp_label
         interaction_label = self.dataset.interaction_label(
             entry.bond_key,
             entry.interaction_key,
         )
-        return interaction_label
+        return interaction_label + icohp_label
 
     def _reset_plot_overlays(self):
         self._clear_plot_widget(self.full_range_plot)
