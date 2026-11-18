@@ -32,6 +32,7 @@ class ReadNebData:
         self.dir = dir
         self.neb_dirs = []
         self.max_min_dirs = self.find_start_stop_dirs()
+        self.image_data = {}
         self.neb_energies = []
         self.neb_positions = []
         self.neb_magnetizations = []
@@ -43,21 +44,20 @@ class ReadNebData:
         self.parse_middle_dirs()
 
     def find_start_stop_dirs(self):
-        for item in os.listdir(self.dir):
-            if os.path.isdir(os.path.join(self.dir, item)) and len(item) == 2:
-                self.neb_dirs.append(item)
-        max_min_dirs = [min(self.neb_dirs), max(self.neb_dirs)]
-        return max_min_dirs
+        self.neb_dirs = sorted(
+            (item for item in os.listdir(self.dir)
+             if item.isdigit() and os.path.isdir(os.path.join(self.dir, item))),
+            key=lambda item: (int(item), item),
+        )
+        if len(self.neb_dirs) < 2:
+            raise ValueError(f"At least two numbered NEB image directories are required in {self.dir}")
+        return [self.neb_dirs[0], self.neb_dirs[-1]]
 
     def parse_middle_dirs(self):
-        middle_neb_dirs = []
-        for item in os.listdir(self.dir):
+        for item in self.neb_dirs[1:-1]:
             neb_dir = os.path.join(self.dir, item)
-            if os.path.isdir(neb_dir) and item not in self.max_min_dirs:
-                middle_neb_dirs.append(neb_dir)
-        middle_neb_dirs.sort()
-        for neb_dir in middle_neb_dirs:
             data = VaspData(neb_dir, parse_doscar=False)
+            self.image_data[item] = data
             try:
                 self.neb_energies.append(data.outcar_data.find_energy())
                 self.neb_positions.append(data.outcar_data.find_coordinates())
@@ -68,24 +68,25 @@ class ReadNebData:
                 self.neb_magnetizations.append([[1]*72])
 
     def parse_start_stop_dirs(self):
-        dirs = os.listdir(self.dir)
-        dirs.sort()
-        for item in dirs:
+        for item in self.max_min_dirs:
             neb_dir = os.path.join(self.dir, item)
             if os.path.isdir(neb_dir) and item in self.max_min_dirs:
                 self.data = VaspData(neb_dir, parse_doscar=False)
+                self.image_data[item] = self.data
                 self.start_stop_positions.append(self.data.outcar_coordinates[-1])
                 self.start_stop_energies.append(self.data.outcar_energies[-1])
                 self.start_stop_magnetizations.append(self.data.outcar_data.magnetizations[-1])
 
 
 class NebWindow(QMainWindow):
-    def __init__(self, parent=None, show=True):
+    def __init__(self, parent=None, show=True, directory=None):
         """ Initialize GUI """
         super().__init__()
 
         QMainWindow.__init__(self, parent)
-        if platform.system() == 'Linux':
+        if directory is not None:
+            self.dir = os.fspath(directory)
+        elif platform.system() == 'Linux':
             self.dir = './'
         else:
             #dir = "D:\\syncme\\modelowanie DFT\\co3o4_new_new\\9.deep_o2_reduction\\5.newest_after_statistics\\2.NEB\\1.2ominus_o2ads\\3.NEB\\4.again_with_converged_wavecars\\3.dummy"
@@ -101,6 +102,7 @@ class NebWindow(QMainWindow):
         self.original_colors = {}
         self.selected_actors = []
         self.actors = []
+        self.icohp_matrix_viewer_window = None
         self.init_UI()
 
     def viewport_border(self, renderer, sides, border_color, border_width):
@@ -216,10 +218,40 @@ class NebWindow(QMainWindow):
             self.add_plane(38, plotter)
 
         self.add_numbers()
+        self.add_lobster_analysis()
 
         # Set main window properties
         self.setWindowTitle(f"NEBviewer v0.0.1 {os.getcwd()}")
         self.resize(1600, 800)
+
+    def add_lobster_analysis(self):
+        self.lobster_menu = self.menuBar().addMenu("LOBSTER")
+        self.icohp_matrix_action = self.lobster_menu.addAction("ICOHP matrices for all images")
+        self.icohp_matrix_action.triggered.connect(self.open_icohp_matrix_viewer)
+        available = any(
+            os.path.isfile(os.path.join(self.dir, image, "ICOHPLIST.lobster"))
+            for image in self.neb.neb_dirs
+        )
+        self.icohp_matrix_action.setEnabled(available)
+        if not available:
+            self.icohp_matrix_action.setToolTip("No ICOHPLIST.lobster files in the NEB image directories")
+
+    def open_icohp_matrix_viewer(self):
+        from lobster.neb_icohp_viewer import NebIcohpMatrixViewer
+
+        if self.icohp_matrix_viewer_window is None:
+            self.icohp_matrix_viewer_window = NebIcohpMatrixViewer(
+                self.dir, image_dirs=self.neb.neb_dirs, neb_window=self,
+            )
+        self.icohp_matrix_viewer_window.refresh_structure_highlight()
+        self.icohp_matrix_viewer_window.show()
+        self.icohp_matrix_viewer_window.raise_()
+        self.icohp_matrix_viewer_window.activateWindow()
+
+    def closeEvent(self, event):
+        if self.icohp_matrix_viewer_window is not None:
+            self.icohp_matrix_viewer_window.close()
+        super().closeEvent(event)
 
     def add_slider_widget(self):
         self.geo_slider = QSlider()

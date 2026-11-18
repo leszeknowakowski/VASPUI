@@ -143,6 +143,13 @@ class EditableColorBarItem(pg.ColorBarItem):
 
         return handle
 
+    def setColorHandles(self, stops):
+        """Replace all handles with (position, RGBA color) stops."""
+        self._clearColorHandles()
+        for position, color in stops:
+            self.addColorHandle(position, color)
+        self._colorHandleChanged()
+
     def setColorHandlePosition(self, handle, pos):
         if handle not in self.color_handles:
             return

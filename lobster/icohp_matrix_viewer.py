@@ -1,6 +1,7 @@
 import sys
 import re
 import os
+import json
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +27,8 @@ ICOHPLIST_FILENAME = (
 ICOHP_COLORMAP_NAME = "ICOHP Mathematica"
 DEFAULT_COLORMAP = ICOHP_COLORMAP_NAME
 LOCAL_ICOHPLIST_FILENAME = "ICOHPLIST.lobster"
+PRESET_FORMAT = "vaspui.icohp-matrix-preset"
+PRESET_VERSION = 1
 
 # Mathematica RGBColor stops scaled to pyqtgraph's expected 8-bit RGBA values.
 ICOHP_COLORMAP_STOPS = (
@@ -103,6 +106,7 @@ class MatrixImageItem(pg.ImageItem):
         return (
             0 <= x_index < self.matrix.shape[0]
             and 0 <= y_index < self.matrix.shape[1]
+            and np.isfinite(self.matrix[x_index, y_index])
         )
 
 
@@ -399,6 +403,8 @@ class SpinMatrixPlots:
         for x_index in range(matrix.shape[0]):
             for y_index in range(matrix.shape[1]):
                 value = float(matrix[x_index, y_index])
+                if not np.isfinite(value):
+                    continue
                 text = pg.TextItem(
                     text=f"{value:.2f}",
                     color=self._label_color(value, max_abs_level),
@@ -713,6 +719,12 @@ class IcohpMatrixViewer(QtWidgets.QWidget):
         )
         color_map_menu.addAction(self.color_handle_positions_action)
 
+        preset_menu = self.menu_bar.addMenu("Presets")
+        self.save_preset_action = ACTION_CLASS("Save preset...", self)
+        self.restore_preset_action = ACTION_CLASS("Restore preset...", self)
+        preset_menu.addAction(self.save_preset_action)
+        preset_menu.addAction(self.restore_preset_action)
+
     def _setup_controls(self):
         controls_layout = QtWidgets.QHBoxLayout()
         self.main_layout.addLayout(controls_layout)
@@ -789,6 +801,8 @@ class IcohpMatrixViewer(QtWidgets.QWidget):
         self.color_handle_positions_action.triggered.connect(
             self.show_color_handle_positions_dialog
         )
+        self.save_preset_action.triggered.connect(self.save_preset)
+        self.restore_preset_action.triggered.connect(self.restore_preset)
         self.show_values_button.toggled.connect(self.toggle_value_labels)
         self.apply_levels_button.clicked.connect(self.apply_color_levels)
         self.auto_levels_button.clicked.connect(self.reset_color_levels)
@@ -914,6 +928,92 @@ class IcohpMatrixViewer(QtWidgets.QWidget):
         self._sync_level_inputs()
         self.update_plot()
 
+    def save_preset(self):
+        filename, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save ICOHP matrix preset",
+            str(self.default_dir / "icohp_matrix.vaspui"),
+            "VASPUI presets (*.vaspui)",
+        )
+        if not filename:
+            return
+        if not filename.lower().endswith(".vaspui"):
+            filename += ".vaspui"
+
+        try:
+            self.save_preset_file(filename)
+        except (OSError, ValueError) as error:
+            QtWidgets.QMessageBox.warning(self, "Save preset failed", str(error))
+
+    def restore_preset(self):
+        filename, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Restore ICOHP matrix preset",
+            str(self.default_dir),
+            "VASPUI presets (*.vaspui)",
+        )
+        if not filename:
+            return
+
+        try:
+            self.load_preset_file(filename)
+        except (OSError, ValueError) as error:
+            QtWidgets.QMessageBox.warning(self, "Restore preset failed", str(error))
+
+    def color_preset(self):
+        """Capture the displayed levels, including edits made on the color bar."""
+        colorbar = self.matrix_plots.colorbar
+        minimum, maximum = self._normalize_levels(colorbar.levels())
+        return {
+            "format": PRESET_FORMAT,
+            "version": PRESET_VERSION,
+            "min_level": minimum,
+            "max_level": maximum,
+            "color_handles": [
+                {"position": float(handle.color_pos), "color": list(handle.color.getRgb())}
+                for handle in sorted(colorbar.color_handles, key=lambda item: item.color_pos)
+            ],
+        }
+
+    def save_preset_file(self, filename):
+        contents = json.dumps(self.color_preset(), indent=2, allow_nan=False) + "\n"
+        Path(filename).write_text(contents, encoding="utf-8")
+
+    def load_preset_file(self, filename):
+        preset = json.loads(Path(filename).read_text(encoding="utf-8"))
+        levels, stops = self._validate_color_preset(preset)
+        self.matrix_plots.colorbar.setColorHandles(stops)
+        self.set_color_levels(levels)
+
+    @classmethod
+    def _validate_color_preset(cls, preset):
+        """Validate the whole file before changing any display settings."""
+        if not isinstance(preset, dict) or preset.get("format") != PRESET_FORMAT:
+            raise ValueError("This file is not an ICOHP matrix preset.")
+        if preset.get("version") != PRESET_VERSION:
+            raise ValueError("Unsupported ICOHP matrix preset version.")
+
+        try:
+            levels = cls._normalize_levels((preset["min_level"], preset["max_level"]))
+            handles = preset["color_handles"]
+            if not isinstance(handles, list) or len(handles) < 2:
+                raise ValueError("A preset must contain at least two color handles.")
+            stops = []
+            for handle in handles:
+                position = float(handle["position"])
+                if not np.isfinite(position) or not 0.0 <= position <= 1.0:
+                    raise ValueError("Color handle positions must be between 0 and 1.")
+                color = handle["color"]
+                if (not isinstance(color, list) or len(color) != 4
+                        or any(type(channel) is not int or not 0 <= channel <= 255
+                               for channel in color)):
+                    raise ValueError("Handle colors must contain four RGBA integers from 0 to 255.")
+                stops.append((position, tuple(color)))
+        except (KeyError, TypeError, OverflowError) as error:
+            raise ValueError("The ICOHP matrix preset contains missing or invalid settings.") from error
+
+        return levels, stops
+
     def set_color_levels(self, levels):
         self.manual_color_levels = self._normalize_levels(levels)
         self._sync_level_inputs()
@@ -938,6 +1038,7 @@ class IcohpMatrixViewer(QtWidgets.QWidget):
     def update_plot(self):
         if self.dataset is None:
             self.matrix_plots.show_empty()
+            self.matrix_plots.colorbar.setLevels(self._current_color_levels())
             self._clear_structure_highlight()
             self._update_empty_info_label()
             self._update_navigation_buttons()
@@ -991,6 +1092,8 @@ class IcohpMatrixViewer(QtWidgets.QWidget):
             raise ValueError("Color levels must contain exactly two values.")
 
         minimum, maximum = (float(levels[0]), float(levels[1]))
+        if not np.isfinite([minimum, maximum]).all():
+            raise ValueError("Color levels must be finite numbers.")
         if not minimum < maximum:
             raise ValueError("Minimum color level must be smaller than maximum color level.")
 
