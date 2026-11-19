@@ -16,6 +16,7 @@ except ImportError:
 import sys
 import os
 from bader import BaderParser
+from lobster.charge import LobsterChargeParser
 toc = time.perf_counter()
 print(f'importing in chgcar, time: {toc - tic:0.4f} seconds')
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'third_party'))
@@ -198,34 +199,48 @@ class ChgcarVis(QWidget):
     def init_bader_UI(self):
         self.bader_file = None
         self.bader_data_loaded = False
+        self.charge_file = None
+        self.lobster_charges = None
+        self.bader_charges_actor = None
+        self.lobster_charges_actor = None
         self.bader_frame = QGroupBox(self)
-        self.bader_frame.setTitle("Bader charge manipulation")
+        self.bader_frame.setTitle("Atomic charge manipulation")
         self.bader_frame.setMinimumHeight(155)
         self.bader_frame_layout = QVBoxLayout(self.bader_frame)
         self.bader_frame_layout.setAlignment(QtCore.Qt.AlignTop)
 
-        open_file_button = QPushButton("Open ACF.dat-corrected file")
-        open_file_button.clicked.connect(self.open_bader_file)
+        open_file_button = QPushButton("Open charge file")
+        open_file_button.clicked.connect(self.open_charge_file)
         self.bader_frame_layout.addWidget(open_file_button)
 
         print_button = QPushButton("Print sum of selection")
-        print_button.clicked.connect(self.print_bader_charge)
+        print_button.setToolTip("For LOBSTER, print the checked charge types, or both if neither is checked.")
+        print_button.clicked.connect(self.print_charge_sum)
         self.bader_frame_layout.addWidget(print_button)
 
         print_separate_button = QPushButton("Print separate selection")
-        print_separate_button.clicked.connect(self.print_separate_bader_charges)
+        print_separate_button.setToolTip(print_button.toolTip())
+        print_separate_button.clicked.connect(self.print_separate_charges)
         self.bader_frame_layout.addWidget(print_separate_button)
 
         self.charges_button_cb = QCheckBox()
         self.charges_button_cb.setChecked(False)
         self.charges_button_cb.setText("show bader charges")
 
-        self.charges_button_cb.stateChanged.connect(self.show_bader_charges)
+        self.charges_button_cb.stateChanged.connect(self.show_charge_labels)
         self.bader_frame_layout.addWidget(self.charges_button_cb)
+
+        self.mulliken_charges_cb = QCheckBox("Show Mulliken charges")
+        self.loewdin_charges_cb = QCheckBox("Show Löwdin charges")
+        for checkbox in (self.mulliken_charges_cb, self.loewdin_charges_cb):
+            checkbox.setVisible(False)
+            checkbox.stateChanged.connect(self.show_charge_labels)
+            self.bader_frame_layout.addWidget(checkbox)
+
         self.structure_variable_control.structure_control_widget.plane_height_range_slider.startValueChanged.connect(
-            self.show_bader_charges)
+            self.show_charge_labels)
         self.structure_variable_control.structure_control_widget.plane_height_range_slider.endValueChanged.connect(
-            self.show_bader_charges)
+            self.show_charge_labels)
 
         self.layout.addWidget(self.bader_frame)
 
@@ -271,21 +286,54 @@ class ChgcarVis(QWidget):
         self.layout.addWidget(self.averaging_frame)
 
     def open_bader_file(self):
-        """
-        functon to create window with bader charge file choose.
-        """
-        if self.bader_file is None:
-            file_path = os.path.join(self.chg_file_path, "ACF.dat-corrected")
-            if os.path.exists(file_path):
-                self.bader_file = file_path
-            else:
-                file_dialog = QFileDialog()
-                file_dialog.setDirectory(self.chg_file_path)
-                file_path, _ = file_dialog.getOpenFileName(self, "choose bader charge file")
+        self.open_charge_file()
 
-            if file_path != "":
-                self.bader_file = file_path
-                self.process_bader_file(self.bader_file)
+    def open_charge_file(self):
+        directory = os.path.dirname(getattr(self, "chg_file_path", "")) or os.getcwd()
+        initial_path = self.charge_file or directory
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Open charge file", initial_path,
+            "Charge files (ACF* CHARGE.lobster);;All files (*)")
+        if file_path:
+            try:
+                self.process_charge_file(file_path)
+            except (OSError, ValueError, IndexError) as error:
+                QMessageBox.warning(self, "Cannot open charge file", str(error))
+
+    def process_charge_file(self, file_path):
+        """Detect the charge format from its contents, including renamed files."""
+        with open(file_path, encoding="utf-8-sig") as stream:
+            header = stream.read(4096).upper()
+        if "MULLIKEN" in header and any(name in header for name in ("LOEWDIN", "LÖWDIN")):
+            self.process_lobster_charge_file(file_path)
+        elif {"X", "Y", "Z", "CHARGE"}.issubset(header.split()):
+            self.process_bader_file(file_path)
+        else:
+            raise ValueError("Choose a Bader ACF.dat-corrected or LOBSTER CHARGE.lobster file.")
+
+    def process_lobster_charge_file(self, file_path):
+        charges = LobsterChargeParser()
+        charges.parse(file_path)
+        symbols = self.structure_variable_control.structure_control_widget.structure_plot_widget.data.stripped_symbols
+        if list(symbols) != charges.symbols:
+            raise ValueError("LOBSTER atom numbers/elements do not match the current structure.")
+
+        self.clear_charge_labels()
+        self.lobster_charges = charges
+        self.bader_data_loaded = False
+        self.bader_file = None
+        self.charge_file = file_path
+        self.charges_button_cb.setVisible(False)
+        self.mulliken_charges_cb.setVisible(True)
+        self.loewdin_charges_cb.setVisible(True)
+        self.show_charge_labels()
+
+    def clear_charge_labels(self):
+        for attribute in ("bader_charges_actor", "lobster_charges_actor"):
+            actor = getattr(self, attribute, None)
+            if actor is not None:
+                self.chg_plotter.remove_actor(actor)
+                setattr(self, attribute, None)
 
     def process_bader_file(self, file_path):
         """
@@ -334,8 +382,48 @@ class ChgcarVis(QWidget):
                                          QMessageBox.No)
 
         if all(matches) or reply == QMessageBox.Yes:
+            self.clear_charge_labels()
             self.bader_data = bader.atoms
             self.bader_data_loaded = True
+            self.bader_file = file_path
+            self.charge_file = file_path
+            self.lobster_charges = None
+            self.charges_button_cb.setVisible(True)
+            self.mulliken_charges_cb.setVisible(False)
+            self.loewdin_charges_cb.setVisible(False)
+            self.show_charge_labels()
+
+    def selected_lobster_charges(self):
+        if self.lobster_charges is None:
+            return []
+        return [(name, values) for name, values, checkbox in (
+            ("Mulliken", self.lobster_charges.mulliken, self.mulliken_charges_cb),
+            ("Löwdin", self.lobster_charges.loewdin, self.loewdin_charges_cb),
+        ) if checkbox.isChecked()]
+
+    def print_charge_sum(self):
+        if self.lobster_charges is None:
+            return self.print_bader_charge()
+        indexes = self.structure_variable_control.get_selected_rows()
+        charge_sets = self.selected_lobster_charges() or [
+            ("Mulliken", self.lobster_charges.mulliken), ("Löwdin", self.lobster_charges.loewdin)]
+        for name, values in charge_sets:
+            print(f"{name}: {sum(values[index] for index in indexes)}")
+
+    def print_separate_charges(self):
+        if self.lobster_charges is None:
+            return self.print_separate_bader_charges()
+        indexes = self.structure_variable_control.get_selected_rows()
+        charge_sets = self.selected_lobster_charges() or [
+            ("Mulliken", self.lobster_charges.mulliken), ("Löwdin", self.lobster_charges.loewdin)]
+        result = {}
+        for name, values in charge_sets:
+            result[name] = {}
+            for index in indexes:
+                atom = self.lobster_charges.symbols[index] + str(self.lobster_charges.atom_numbers[index])
+                result[name][atom] = values[index]
+                print(f"{name} {atom}: {values[index]}")
+        return result
 
     def print_bader_charge(self):
         if self.bader_data_loaded:
@@ -355,11 +443,29 @@ class ChgcarVis(QWidget):
                 print(key, ": ", value)
             return chg_dict
 
+    def show_charge_labels(self, *_):
+        self.clear_charge_labels()
+        self.show_bader_charges(self.charges_button_cb.isChecked())
+        charge_sets = self.selected_lobster_charges()
+        if not charge_sets:
+            return
+        indices, coordinates = self.structure_variable_control.structure_control_widget.find_indices_between_planes()
+        if not len(indices):
+            return
+        coords = [list(coordinates[index]) for index in indices]
+        labels = ["\n".join(f"{name}: {values[index]:.2f}" for name, values in charge_sets) for index in indices]
+        self.lobster_charges_actor = self.chg_plotter.add_point_labels(
+            coords, labels, font_size=30, show_points=False, always_visible=True,
+            shape=None, name="lobster_charges")
+
     def show_bader_charges(self, flag):
-        if self.bader_data_loaded:
-            if hasattr(self, "bader_charges_actor"):
-                self.chg_plotter.renderer.RemoveActor(self.bader_charges_actor)
+        if self.bader_charges_actor is not None:
+            self.chg_plotter.remove_actor(self.bader_charges_actor)
+            self.bader_charges_actor = None
+        if self.bader_data_loaded and self.charges_button_cb.isChecked():
             indices, coordinates = self.structure_variable_control.structure_control_widget.find_indices_between_planes()
+            if not len(indices):
+                return
             coords = []
             baders = []
 
@@ -375,6 +481,16 @@ class ChgcarVis(QWidget):
     def update_data(self, data):
         if self.current_contour_actor is not None:
             self.clear_contours()
+        self.clear_charge_labels()
+        self.bader_file = None
+        self.charge_file = None
+        self.bader_data_loaded = False
+        self.lobster_charges = None
+        for checkbox in (self.charges_button_cb, self.mulliken_charges_cb, self.loewdin_charges_cb):
+            checkbox.setChecked(False)
+        self.charges_button_cb.setVisible(True)
+        self.mulliken_charges_cb.setVisible(False)
+        self.loewdin_charges_cb.setVisible(False)
 
     def set_spin_type(self, type="total"):
         """ set the type of spin to visualise on charge
