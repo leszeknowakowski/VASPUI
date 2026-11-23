@@ -17,6 +17,7 @@ import sys
 import os
 from bader import BaderParser
 from lobster.charge import LobsterChargeParser
+from ddec_bond_orders import DDECBondOrders, parse_atom_ranges
 toc = time.perf_counter()
 print(f'importing in chgcar, time: {toc - tic:0.4f} seconds')
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'third_party'))
@@ -244,18 +245,135 @@ class ChgcarVis(QWidget):
 
     def init_DDEC_UI(self):
         self.DDEC_file = None
+        self.ddec_bond_orders = None
+        self.ddec_bond_orders_actor = None
+        self.ddec_atom_count = None
+        self.ddec_frag1_atoms = []
+        self.ddec_frag2_atoms = []
+        self.ddec_window = None
 
         self.ddec_frame = QGroupBox(self)
         self.ddec_frame.setTitle("Bond order manipulation")
-        self.ddec_frame.setMinimumHeight(80)
         self.ddec_frame_layout = QVBoxLayout(self.ddec_frame)
         self.ddec_frame_layout.setAlignment(QtCore.Qt.AlignTop)
 
+        self.DDEC_open_file_btn = QPushButton("Open DDEC bond-order file")
+        self.DDEC_open_file_btn.clicked.connect(self.open_ddec_bond_order_file)
+        self.ddec_frame_layout.addWidget(self.DDEC_open_file_btn)
+        self.DDEC_file_label = QLabel("No bond-order file selected")
+        self.DDEC_file_label.setWordWrap(True)
+        self.ddec_frame_layout.addWidget(self.DDEC_file_label)
+        self.DDEC_bond_orders_cb = QCheckBox("Show bond orders")
+        self.DDEC_bond_orders_cb.setVisible(False)
+        self.DDEC_bond_orders_cb.toggled.connect(self.show_ddec_bond_orders)
+        self.ddec_frame_layout.addWidget(self.DDEC_bond_orders_cb)
         self.DDEC_choose_window_btn = QPushButton("Choose DDEC fragments")
         self.DDEC_choose_window_btn.clicked.connect(self.perform_BO)
         self.ddec_frame_layout.addWidget(self.DDEC_choose_window_btn)
+        self.DDEC_summary_label = QLabel("All atom pairs")
+        self.DDEC_summary_label.setWordWrap(True)
+        self.ddec_frame_layout.addWidget(self.DDEC_summary_label)
+
+        self.structure_variable_control.structure_changed.connect(self.show_ddec_bond_orders)
+        self.structure_variable_control.atom_selection_changed.connect(self.show_ddec_bond_orders)
+        self.structure_variable_control.structure_control_widget.cutoff_planes_changed.connect(
+            self.show_ddec_bond_orders)
+        self.structure_variable_control.atom_deleted.connect(self.clear_ddec_data)
 
         self.layout.addWidget(self.ddec_frame)
+
+    def open_ddec_bond_order_file(self):
+        directory = os.path.dirname(getattr(self, "chg_file_path", "")) or os.getcwd()
+        initial_path = self.DDEC_file or os.path.join(directory, "DDEC6_even_tempered_bond_orders.cleaned")
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Open DDEC bond orders", initial_path,
+            "DDEC bond orders (*.cleaned *.csv);;All files (*)")
+        if file_path:
+            try:
+                self.process_ddec_bond_order_file(file_path)
+            except (OSError, ValueError, UnicodeError) as error:
+                QMessageBox.warning(self, "Cannot open DDEC bond orders", str(error))
+
+    def process_ddec_bond_order_file(self, file_path):
+        orders = DDECBondOrders.read(file_path)
+        data = self.structure_variable_control.structure_control_widget.structure_plot_widget.data
+        orders.validate_structure(data.stripped_symbols)
+        # Replace the current data only after the new file has been validated.
+        self.clear_ddec_bond_order_labels()
+        self.ddec_bond_orders = orders
+        self.ddec_atom_count = len(data.stripped_symbols)
+        self.DDEC_file = os.fspath(file_path)
+        self.DDEC_file_label.setText(os.path.basename(self.DDEC_file))
+        self.DDEC_file_label.setToolTip(self.DDEC_file)
+        self.DDEC_bond_orders_cb.setVisible(True)
+        self.show_ddec_bond_orders()
+
+    def clear_ddec_bond_order_labels(self):
+        if self.ddec_bond_orders_actor is not None:
+            self.chg_plotter.remove_actor(self.ddec_bond_orders_actor)
+            self.ddec_bond_orders_actor = None
+
+    def clear_ddec_data(self, *_):
+        self.clear_ddec_bond_order_labels()
+        self.DDEC_file = None
+        self.ddec_bond_orders = None
+        self.ddec_atom_count = None
+        self.ddec_frag1_atoms = []
+        self.ddec_frag2_atoms = []
+        self.DDEC_bond_orders_cb.setChecked(False)
+        self.DDEC_bond_orders_cb.setVisible(False)
+        self.DDEC_file_label.setText("No bond-order file selected")
+        self.DDEC_file_label.setToolTip("")
+        self.update_ddec_summary()
+        if self.ddec_window is not None:
+            self.ddec_window.close()
+            self.ddec_window.set_fragments([], [])
+
+    def filtered_ddec_bond_orders(self):
+        control = self.structure_variable_control.structure_control_widget
+        indices, _ = control.find_indices_between_planes(use_selection=False)
+        allowed = set(indices)
+        selected = self.structure_variable_control.get_selected_rows()
+        if selected:
+            allowed.intersection_update(selected)
+        bonds = self.ddec_bond_orders.between_fragments(self.ddec_frag1_atoms, self.ddec_frag2_atoms)
+        return [bond for bond in bonds
+                if bond.atom1 - 1 in allowed and bond.atom2 - 1 in allowed]
+
+    def update_ddec_summary(self, bonds=None):
+        if self.ddec_frag1_atoms:
+            frag1 = DDECAtomSelector.format_atoms(self.ddec_frag1_atoms)
+            frag2 = DDECAtomSelector.format_atoms(self.ddec_frag2_atoms) if self.ddec_frag2_atoms else "all other atoms"
+            text = f"Fragment 1: {frag1}\nFragment 2: {frag2}"
+        else:
+            text = "All atom pairs"
+        if self.ddec_bond_orders is not None:
+            if bonds is None:
+                bonds = self.filtered_ddec_bond_orders()
+            text += f"\n{len(bonds)} pairs; bond-order sum: {sum(bond.value for bond in bonds):.6f}"
+        self.DDEC_summary_label.setText(text)
+        self.DDEC_summary_label.setMinimumHeight(self.DDEC_summary_label.sizeHint().height())
+
+    def show_ddec_bond_orders(self, *_):
+        self.clear_ddec_bond_order_labels()
+        if self.ddec_bond_orders is None:
+            return
+        control = self.structure_variable_control.structure_control_widget
+        coordinates = np.asarray(control.structure_plot_widget.data.outcar_coordinates[
+            control.geometry_slider.value()], dtype=float)
+        if len(coordinates) != self.ddec_atom_count:
+            self.clear_ddec_data()
+            return
+        bonds = self.filtered_ddec_bond_orders()
+        self.update_ddec_summary(bonds)
+        if not self.DDEC_bond_orders_cb.isChecked():
+            return
+        if not bonds:
+            return
+        midpoints = [(coordinates[bond.atom1 - 1] + coordinates[bond.atom2 - 1]) / 2 for bond in bonds]
+        self.ddec_bond_orders_actor = self.chg_plotter.add_point_labels(
+            np.asarray(midpoints), [f"{bond.value:.4f}" for bond in bonds], font_size=18,
+            show_points=False, always_visible=True, shape=None, name="ddec_bond_orders")
 
     def init_volumetric_edit_UI(self):
         self.volumetric_edit_data = []
@@ -477,6 +595,7 @@ class ChgcarVis(QWidget):
             self.bader_charges_actor.SetVisibility(flag)
                   
     def update_data(self, data):
+        self.clear_ddec_data()
         if self.current_contour_actor is not None:
             self.clear_contours()
         self.clear_charge_labels()
@@ -506,71 +625,20 @@ class ChgcarVis(QWidget):
         self.contour_type = type
 
     def perform_BO(self):
-        self.ddec_window = DDECAtomSelector(self)
-        self.ddec_window.fragments_selected.connect(self.run_bo_script)
+        if self.ddec_window is None:
+            self.ddec_window = DDECAtomSelector(self)
+            self.ddec_window.fragments_selected.connect(self.apply_ddec_fragments)
+        if not self.ddec_window.isVisible():
+            self.ddec_window.set_fragments(self.ddec_frag1_atoms, self.ddec_frag2_atoms)
         self.ddec_window.show()
+        self.ddec_window.raise_()
+        self.ddec_window.activateWindow()
 
-    def run_bo_script(self, frag1, frag2):
-
-        if not frag1:
-            print("ERROR: Fragment 1 cannot be empty.")
-            return
-
-        base_dir = "./"
-        base_name = "DDEC6_even_tempered_bond_orders"
-        script_dir = os.path.join(os.path.dirname(__file__), "scripts")
-
-        xyz_file = os.path.join(base_dir, f"{base_name}.xyz")
-        csv_file = os.path.join(base_dir, f"{base_name}.csv")
-        corrected_path = os.path.join(base_dir, f"{base_name}-corrected.xyz")
-        fragments_path = os.path.join(base_dir, f"{base_name}-fragments.xyz")
-
-        if not os.path.exists(xyz_file):
-            print("Cannot read xyz file")
-            return
-
-        # Step 1 ? cleanup
-        subprocess.run([
-            "awk",
-            "-f", os.path.join(script_dir, "chargemol_cleanup_bo.awk"),
-            "-v", "threshold=0",
-            "-v", "format=csv",
-            "-v", "triangle=yes"
-        ], input=open(xyz_file).read(), text=True,
-            stdout=open(csv_file, "w"))
-
-        ranges_script = os.path.join(script_dir, "vasp_bader_get_ranges.awk")
-
-        atoms_value = subprocess.getoutput(f"awk -f {ranges_script}")
-
-        # Step 2 ? fragments
-        awk_command = [
-            "awk",
-            "-v", f'atoms="{atoms_value}"',
-            "-v", f"frag1={frag1}",
-        ]
-
-        if frag2:
-            awk_command += ["-v", f"frag2={frag2}"]
-
-        awk_command += [
-            "-f", os.path.join(script_dir, "chargemol_frags.awk"),
-            csv_file
-        ]
-
-        with open(corrected_path, "w") as stdout_file, \
-                open(fragments_path, "w") as stderr_file:
-
-            result = subprocess.run(
-                awk_command,
-                stdout=stdout_file,
-                stderr=stderr_file,
-                text=True
-            )
-
-        with open(fragments_path, "r") as fragment_file:
-            lines = fragment_file.readlines()
-            print(lines[-1])
+    def apply_ddec_fragments(self, frag1, frag2):
+        self.ddec_frag1_atoms = parse_atom_ranges(frag1)
+        self.ddec_frag2_atoms = parse_atom_ranges(frag2)
+        self.update_ddec_summary()
+        self.show_ddec_bond_orders()
 
     def edit_volumetric_data(self):
         self.volume_editing_window = VolumetricDataEditingWindow(self)
@@ -1089,24 +1157,27 @@ class SupercellShapeDialog(QDialog):
 class DDECAtomSelector(QWidget):
     fragments_selected = QtCore.pyqtSignal(str, str)  # frag1, frag2
     def __init__(self, parent):
-        super().__init__()
+        super().__init__(parent, QtCore.Qt.Window)
         self.parent = parent
-        self.setWindowFlags(QtCore.Qt.WindowStaysOnTopHint)
+        self.setWindowFlags(QtCore.Qt.Window | QtCore.Qt.WindowStaysOnTopHint)
         self.frag1_atoms = []
         self.frag2_atoms = []
 
         self.init_ui()
+        self.set_fragments([], [])
 
     def init_ui(self):
         self.setWindowTitle("Fragment Selector")
 
         # Buttons
-        self.btn_frag1 = QPushButton("choose selected atoms for frag1")
-        self.btn_frag2 = QPushButton("choose selected atoms for frag2")
+        self.btn_frag1 = QPushButton("Use selected atoms for fragment 1")
+        self.btn_frag2 = QPushButton("Use selected atoms for fragment 2")
 
         # Labels to show selected atoms
         self.label_frag1 = QLabel("[]")
         self.label_frag2 = QLabel("[]")
+        self.label_frag1.setWordWrap(True)
+        self.label_frag2.setWordWrap(True)
 
         # Connect buttons
         self.btn_frag1.clicked.connect(self.handle_frag1)
@@ -1122,10 +1193,32 @@ class DDECAtomSelector(QWidget):
         layout_frag2.addWidget(self.label_frag2)
 
         main_layout = QVBoxLayout()
+        hint = QLabel("Select atoms in the structure or atom table, then assign each fragment. "
+                      "Leave fragment 2 empty to use all other atoms.")
+        hint.setWordWrap(True)
+        main_layout.addWidget(hint)
         main_layout.addLayout(layout_frag1)
         main_layout.addLayout(layout_frag2)
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        self.ok_button = QPushButton("OK")
+        self.cancel_button = QPushButton("Cancel")
+        self.ok_button.clicked.connect(self.confirm_selection)
+        self.cancel_button.clicked.connect(self.close)
+        buttons.addWidget(self.ok_button)
+        buttons.addWidget(self.cancel_button)
+        main_layout.addLayout(buttons)
 
         self.setLayout(main_layout)
+        self.resize(520, 200)
+
+    def set_fragments(self, fragment1, fragment2):
+        self.frag1_atoms = sorted(set(fragment1))
+        self.frag2_atoms = sorted(set(fragment2))
+        self.frag1_formatted_atoms = self.format_atoms(self.frag1_atoms)
+        self.frag2_formatted_atoms = self.format_atoms(self.frag2_atoms)
+        self.label_frag1.setText(self.frag1_formatted_atoms)
+        self.label_frag2.setText(self.frag2_formatted_atoms)
 
     # -------- Button handlers --------
 
@@ -1141,9 +1234,6 @@ class DDECAtomSelector(QWidget):
         self.label_frag2.setText(formatted)
         self.frag2_formatted_atoms = formatted
 
-    # -------- Dummy selection functions --------
-    # Replace these with your real selection logic
-
     def choose_atoms_frag1(self):
         frag = self.parent.structure_variable_control.print_selected_atoms(print_atoms=False)
         return frag
@@ -1154,11 +1244,12 @@ class DDECAtomSelector(QWidget):
 
     # -------- Formatting logic --------
 
-    def format_atoms(self, atom_list):
+    @staticmethod
+    def format_atoms(atom_list):
         if not atom_list:
             return "[]"
 
-        atom_list = sorted(atom_list)
+        atom_list = sorted(set(atom_list))
         result = []
         start = atom_list[0]
         prev = atom_list[0]
@@ -1167,15 +1258,16 @@ class DDECAtomSelector(QWidget):
             if num == prev + 1:
                 prev = num
             else:
-                result.append(self._format_range(start, prev))
+                result.append(DDECAtomSelector._format_range(start, prev))
                 start = num
                 prev = num
 
-        result.append(self._format_range(start, prev))
+        result.append(DDECAtomSelector._format_range(start, prev))
 
         return ",".join(result)
 
-    def _format_range(self, start, end):
+    @staticmethod
+    def _format_range(start, end):
         length = end - start + 1
         if length >= 3:
             return f"{start}-{end}"
@@ -1184,17 +1276,16 @@ class DDECAtomSelector(QWidget):
         else:
             return f"{start}"
 
-    def closeEvent(self, event):
-        if not self.frag1_formatted_atoms:
-            QMessageBox.warning(self, "Warning", "Fragment 1 cannot be empty!")
-            event.ignore()
+    def confirm_selection(self):
+        if not self.frag1_atoms:
+            QMessageBox.warning(self, "Cannot choose fragments", "Fragment 1 cannot be empty.")
             return
-        if hasattr(self, "frag2_formatted_atoms"):
-            frag2 = self.frag2_formatted_atoms
-        else:
-            frag2 = ""
+        if set(self.frag1_atoms) & set(self.frag2_atoms):
+            QMessageBox.warning(self, "Cannot choose fragments", "The two fragments must not share atoms.")
+            return
+        frag2 = self.frag2_formatted_atoms if self.frag2_atoms else ""
         self.fragments_selected.emit(self.frag1_formatted_atoms, frag2)
-        event.accept()
+        self.close()
 
 import sys
 from PyQt5.QtWidgets import (
@@ -1386,6 +1477,3 @@ class VolumetricDataEditingWindow(QWidget):
         elif op == "divide":
             with np.errstate(divide='ignore', invalid='ignore'):
                 np.divide(target, other, out=target, where=other != 0)
-
-
-

@@ -1115,12 +1115,12 @@ class StructureControlsWidget(QWidget):
                                                                                   shape=None)
             self.structure_plot_widget.symb_actor.SetVisibility(flag)
 
-    def find_indices_between_planes(self):
+    def find_indices_between_planes(self, use_selection=True):
         indices = []
         global_coordinates = np.array(self.structure_plot_widget.data.outcar_coordinates[self.geometry_slider.value()])
         if not len(global_coordinates):
             return [], global_coordinates
-        if self.selected_actors != []:
+        if use_selection and self.selected_actors != []:
             coordinates = []
             for actor in self.selected_actors:
                 center = actor.GetCenter()

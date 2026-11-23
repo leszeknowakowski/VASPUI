@@ -142,6 +142,8 @@ class MainWindow(QMainWindow):
         delete_action = QAction(QIcon(os.path.join(icon_path, "delete.png")), "delete atoms", self)
         add_action = QAction(QIcon(os.path.join(icon_path, "add.png")), "add atoms", self)
         render_bond_distance_action = QAction(QIcon(os.path.join(icon_path, "add_bond.png")), "Bond distance", self)
+        angle_action = QAction(QIcon(os.path.join(icon_path, "angle.svg")), "Angle", self)
+        angle_action.setToolTip("Select three atoms in order; the second selected atom is the angle's vertex.")
 
         right_action.triggered.connect(lambda: self.structure_variable_control_tab.translate_object(direction='right'))
         left_action.triggered.connect(lambda: self.structure_variable_control_tab.translate_object(direction='left'))
@@ -152,9 +154,10 @@ class MainWindow(QMainWindow):
         delete_action.triggered.connect(self.structure_variable_control_tab.delete_atoms)
         add_action.triggered.connect(self.structure_variable_control_tab.add_atom)
         render_bond_distance_action.triggered.connect(self.structure_variable_control_tab.add_bond_length)
+        angle_action.triggered.connect(self.structure_variable_control_tab.add_angle)
 
         # Add action to toolbar
-        actions = [right_action, left_action, down_action, up_action, in_action, out_action, delete_action, add_action, render_bond_distance_action]
+        actions = [right_action, left_action, down_action, up_action, in_action, out_action, delete_action, add_action, render_bond_distance_action, angle_action]
         self.toolbar.addActions(actions)
 
     def create_menubar(self):
@@ -186,6 +189,7 @@ class MainWindow(QMainWindow):
         move_atoms_window = QAction("Move atoms", self)
         planes_action = QAction("Planes", self)
         clear_bonds_menu_action = QAction("Clear Bonds", self)
+        clear_angles_menu_action = QAction("Clear Angles", self)
         view_cameras_action = QAction("View Cameras", self)
         view_convex_hull_action = QAction("View Convex Hull", self)
 
@@ -195,6 +199,7 @@ class MainWindow(QMainWindow):
         move_atoms_window.triggered.connect(self.structure_variable_control_tab.move_atoms_widget)
         planes_action.triggered.connect(self.structure_plot_control_tab.show_planes_dialog)
         clear_bonds_menu_action.triggered.connect(self.structure_variable_control_tab.remove_bond_lengths)
+        clear_angles_menu_action.triggered.connect(self.structure_variable_control_tab.clear_angles)
         view_cameras_action.triggered.connect(self.structure_plot_interactor_widget.show_camera_menu)
         view_convex_hull_action.triggered.connect(self.structure_variable_control_tab.view_convex_hull)
 
@@ -236,6 +241,7 @@ class MainWindow(QMainWindow):
         camera_menu.addAction(view_cameras_action)
 
         actors_menu.addAction(clear_bonds_menu_action)
+        actors_menu.addAction(clear_angles_menu_action)
 
         styles_menu = menubar.addMenu('Styles')
         change_styles_action = QAction("Change styles", self)

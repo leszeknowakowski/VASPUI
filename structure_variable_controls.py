@@ -16,6 +16,7 @@ from ase.io import read
 from ase.neighborlist import NeighborList, natural_cutoffs
 from ase.constraints import FixBondLength, FixLinearTriatomic
 from config import AppConfig
+from angle_measurement import AngleMeasurement
 AppConfig.load()
 from vtk import vtkNamedColors,  vtkActor, vtkPoints, vtkCellArray, vtkLine, vtkPolyData, vtkPolyDataMapper
 
@@ -238,6 +239,8 @@ class StructureVariableControls(QWidget):
     atom_deleted = pyqtSignal(int)
     all_atoms_deleted = pyqtSignal(str)
     selected_actors_signal = pyqtSignal(list)
+    structure_changed = pyqtSignal()
+    atom_selection_changed = pyqtSignal()
     UPDATE_ATOMS = 1 << 0
     UPDATE_TABLE = 1 << 1
     UPDATE_TABLE_FULL = 1 << 2
@@ -249,6 +252,8 @@ class StructureVariableControls(QWidget):
         super().__init__(structure_control_widget)
 
         self.bonds = []
+        self.angles = []
+        self.atom_selection_order = []
         self.tableWidget = None
         self.layout = QVBoxLayout(self)
         self.layout.setAlignment(Qt.AlignTop)
@@ -455,6 +460,8 @@ class StructureVariableControls(QWidget):
         return header_to_index
 
     def update_data(self):
+        self.atom_selection_order = []
+        self.clear_angles()
         self.change_table_when_atom_added()
         self.remove_bond_lengths()
 
@@ -494,6 +501,7 @@ class StructureVariableControls(QWidget):
         )
 
     def deleteRow(self, row, rebuild=True):
+        self.clear_angles()
         # Call delete_row method from data manager
         self.structure_control_widget.delete_row(row)
         if rebuild:
@@ -509,18 +517,18 @@ class StructureVariableControls(QWidget):
             actor.GetProperty().SetColor(vtk_color)
 
         selected_rows = self.tableWidget.selectionModel().selectedRows()
+        self.remember_atom_selection_order(item.row() for item in selected_rows)
         if not selected_rows:
             self.structure_control_widget.add_bonds()
+            self.atom_selection_changed.emit()
             return
 
-        selected_rows_indexes = set()
-        for item in selected_rows:
-            selected_rows_indexes.add(item.row())
-        for row in selected_rows_indexes:
+        for row in self.atom_selection_order:
             if 0 <= row < len(actors):
                 actors[row].GetProperty().SetColor(colors.GetColor3d('Yellow'))
                 self.structure_control_widget.selected_actors.append(actors[row])
         self.structure_control_widget.add_bonds()
+        self.atom_selection_changed.emit()
         return
 
     def is_row_selected(self, row):
@@ -568,6 +576,15 @@ class StructureVariableControls(QWidget):
             for item in self.tableWidget.selectedItems():
                 rows.append(item.row())
         return rows
+
+    def remember_atom_selection_order(self, rows):
+        """Keep existing selection order and append atoms as they are selected."""
+        rows = list(dict.fromkeys(rows))
+        selected = set(rows)
+        self.atom_selection_order = [row for row in self.atom_selection_order if row in selected]
+        remembered = set(self.atom_selection_order)
+        self.atom_selection_order.extend(row for row in rows if row not in remembered)
+        return list(self.atom_selection_order)
 
     def handle_request_selected(self):
         rows = self.get_selected_rows()
@@ -655,6 +672,7 @@ class StructureVariableControls(QWidget):
         self.atom_choose_window.sig.connect(self.change_data_when_atom_added)
 
     def change_data_when_atom_added(self):
+        self.clear_angles()
         name,  x,  y,  z,  x_constr,  y_constr,  z_constr,  magmom , suffix, mag = self.atom_choose_window.get_atom_and_coords()
         names = self.structure_control_widget.structure_plot_widget.data.symbols
         if  name in names:
@@ -735,6 +753,9 @@ class StructureVariableControls(QWidget):
 
         if flags & self.UPDATE_STATUS:
             self.structure_control_widget.update_geometry_status()
+
+        if flags & self.UPDATE_ATOMS:
+            self.structure_changed.emit()
 
 
     def flush_deferred_structure_updates(self):
@@ -1169,6 +1190,7 @@ class StructureVariableControls(QWidget):
         )
 
     def sort_by_column(self):
+        self.clear_angles()
         mapping = self.sort_mapping()
         self.tableWidget.blockSignals(True)
         self.tableWidget.update_all_data(mapping=mapping, sort=True)
@@ -1251,11 +1273,37 @@ class StructureVariableControls(QWidget):
             bond.clear_bond_labels()
         self.bonds = []
 
+    def add_angle(self):
+        selected_atoms = self.remember_atom_selection_order(self.get_selected_rows())
+        if len(selected_atoms) != 3:
+            QMessageBox.information(self, "Measure angle", "Select exactly three atoms in order. The second selected atom is the vertex.")
+            return
+        control = self.structure_control_widget
+        coordinates = control.structure_plot_widget.data.outcar_coordinates[control.geometry_slider.value()]
+        measurement = AngleMeasurement(selected_atoms, control.plotter)
+        angle = measurement.update(coordinates)
+        if angle is None:
+            QMessageBox.warning(self, "Cannot measure angle", "The selected atoms must have distinct positions at the vertex and finite coordinates.")
+            return
+        self.angles.append(measurement)
+        atom1, vertex, atom3 = (index + 1 for index in selected_atoms)
+        print(f"Angle {atom1}–{vertex}–{atom3}: {angle:.2f}° (vertex: atom {vertex})")
+
+    def clear_angles(self):
+        for measurement in self.angles:
+            measurement.clear()
+        self.angles = []
+        self.structure_control_widget.plotter.render()
+
 
     def update_bonds(self):
         for bond in self.bonds:
             bond.clear_bond_labels()
             bond.add_bond_length()
+        control = self.structure_control_widget
+        coordinates = control.structure_plot_widget.data.outcar_coordinates[control.geometry_slider.value()]
+        for measurement in self.angles:
+            measurement.update(coordinates)
 
     def view_convex_hull(self):
         from convex_hull import ConvexHullWidget
