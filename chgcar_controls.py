@@ -237,9 +237,7 @@ class ChgcarVis(QWidget):
             checkbox.stateChanged.connect(self.show_charge_labels)
             self.bader_frame_layout.addWidget(checkbox)
 
-        self.structure_variable_control.structure_control_widget.plane_height_range_slider.startValueChanged.connect(
-            self.show_charge_labels)
-        self.structure_variable_control.structure_control_widget.plane_height_range_slider.endValueChanged.connect(
+        self.structure_variable_control.structure_control_widget.cutoff_planes_changed.connect(
             self.show_charge_labels)
 
         self.layout.addWidget(self.bader_frame)

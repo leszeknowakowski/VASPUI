@@ -184,6 +184,7 @@ class MainWindow(QMainWindow):
 
         modify_constraints_action = QAction("Modify Constraints", self)
         move_atoms_window = QAction("Move atoms", self)
+        planes_action = QAction("Planes", self)
         clear_bonds_menu_action = QAction("Clear Bonds", self)
         view_cameras_action = QAction("View Cameras", self)
         view_convex_hull_action = QAction("View Convex Hull", self)
@@ -192,6 +193,7 @@ class MainWindow(QMainWindow):
         copy_action.triggered.connect(self.structure_variable_control_tab.tableWidget.copy_table)
         modify_constraints_action.triggered.connect(self.structure_variable_control_tab.modify_constraints)
         move_atoms_window.triggered.connect(self.structure_variable_control_tab.move_atoms_widget)
+        planes_action.triggered.connect(self.structure_plot_control_tab.show_planes_dialog)
         clear_bonds_menu_action.triggered.connect(self.structure_variable_control_tab.remove_bond_lengths)
         view_cameras_action.triggered.connect(self.structure_plot_interactor_widget.show_camera_menu)
         view_convex_hull_action.triggered.connect(self.structure_variable_control_tab.view_convex_hull)
@@ -217,6 +219,7 @@ class MainWindow(QMainWindow):
         modify_menu = menubar.addMenu('Modify')
         modify_menu.addAction(modify_constraints_action)
         modify_menu.addAction(move_atoms_window)
+        modify_menu.addAction(planes_action)
 
         view_menu = menubar.addMenu('View')
         actors_menu = QMenu("Actors", self)

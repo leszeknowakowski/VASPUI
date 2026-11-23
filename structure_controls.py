@@ -11,6 +11,7 @@ from PyQt5.QtGui import QIcon, QCursor
 from scipy.spatial import cKDTree
 
 from RangeSlider import QRangeSlider
+from planes_dialog import PlanesDialog, ScenePlane, miller_plane
 from vtk import vtkNamedColors, vtkPlaneSource, vtkActor, vtkLineSource, vtkSphereSource, vtkTubeFilter, \
     vtkPolyDataMapper, vtkArrowSource, \
 vtkTransformPolyDataFilter, vtkTransform, vtkPoints, vtkCellArray, vtkLine, vtkPolyData
@@ -42,6 +43,8 @@ class StructureControlsWidget(QWidget):
     """
     selected_actors_changed = QtCore.pyqtSignal(list)
     geometry_status_changed = QtCore.pyqtSignal(str)
+    planes_changed = QtCore.pyqtSignal()
+    cutoff_planes_changed = QtCore.pyqtSignal()
 
     def __init__(self, structure_plot_widget, parent=None):
         super().__init__()
@@ -89,6 +92,9 @@ class StructureControlsWidget(QWidget):
         self.sphere_radius = 0.5
         self.constrains = self.structure_plot_widget.data.constrains
         self.selected_actors = []
+        self.planes = []
+        self.planes_dialog = None
+        self._plane_number = 0
 
         self.shift_pressed = False
 
@@ -105,6 +111,7 @@ class StructureControlsWidget(QWidget):
         self.add_sphere(initialize=True)
 
     def update_data(self):
+        self.reset_planes()
         self.geometry_slider.setMaximum(len(self.structure_plot_widget.data.outcar_coordinates) - 1)
         self.geometry_slider.setValue(0)
         self.geometry_value_label.setText(f"Geometry number: {self.geometry_slider.value()}")
@@ -357,24 +364,21 @@ class StructureControlsWidget(QWidget):
 
         self.plane_height_range_slider.handle.setTextColor((218,224,218))
 
-        self.plane_height_range_slider.startValueChanged.connect(self.toggle_mag_above_plane)
         self.plane_height_range_slider.startValueChanged.connect(self.all_planes_position)
-        self.plane_height_range_slider.startValueChanged.connect(self.toggle_constrain_above_plane)
-        self.plane_height_range_slider.startValueChanged.connect(self.toggle_symbols_between_planes)
 
-        self.plane_height_range_slider.endValueChanged.connect(self.toggle_mag_above_plane)
         self.plane_height_range_slider.endValueChanged.connect(self.all_planes_position)
-        self.plane_height_range_slider.endValueChanged.connect(self.toggle_constrain_above_plane)
-        self.plane_height_range_slider.endValueChanged.connect(self.toggle_symbols_between_planes)
 
         self.add_plane(self.plane_height_range_slider.getRange()[0])
         self.add_plane_higher(self.plane_height_range_slider.getRange()[1])
-        self.structure_plot_widget.plane_actor_heigher.GetProperty().SetOpacity(0)
+        self.structure_plot_widget.plane_actor_heigher.SetVisibility(False)
+        self._register_cutoff_plane("bottom")
+        self._register_cutoff_plane("top")
+        self._plane_slider_values = self.plane_height_range_slider.getRange()
 
         plane_color_label = QtWidgets.QLabel("planes color:")
 
         self.plane_color_button = pg.ColorButton()
-        self.plane_color_button.setColor(np.array([0.890, 0.8119, 0.341])*255)
+        self.plane_color_button.setColor((255, 255, 255))
         self.plane_color_button.sigColorChanging.connect(self.change_plane_color)
 
         self.plane_transparency_label = QtWidgets.QLabel("Transparency: 0%")
@@ -576,17 +580,10 @@ class StructureControlsWidget(QWidget):
 
     def toggle_spheres_between_planes(self, flag):
         if self.sphere_selected_cb.isChecked():
-            for actor in self.structure_plot_widget.sphere_actors:
-                actor.SetVisibility(0)
-
             indices, coordinates = self.find_indices_between_planes()
-            #for i in range(len(indices)):
-            #    self.structure_plot_widget.sphere_actors[i].SetVisibility(flag)
+            visible_indices = set(indices)
             for i, actor in enumerate(self.structure_plot_widget.sphere_actors):
-                center = actor.GetCenter()
-                for coord in coordinates:
-                    if (np.round(np.array(center), 2) == np.round(np.array(coord), 2)).all():
-                        actor.SetVisibility(flag)
+                actor.SetVisibility(bool(flag) and i in visible_indices)
         else:
             for actor in self.structure_plot_widget.sphere_actors:
                 actor.SetVisibility(1)
@@ -875,36 +872,149 @@ class StructureControlsWidget(QWidget):
         source.SetPoint1(self.structure_plot_widget.data.x + 5, -5, z / 100 * value)
         source.SetPoint2(-5, self.structure_plot_widget.data.y + 5, z / 100 * value)
         source.Update()
-        plane = source.GetOutput()
-
         # Create a mapper and actor
         mapper = vtkPolyDataMapper()
-        mapper.SetInputData(plane)
+        mapper.SetInputConnection(source.GetOutputPort())
 
         actor.SetMapper(mapper)
         actor.GetProperty().SetColor(colors.GetColor3d('White'))
-        actor.GetProperty().SetAmbient(100)
+        actor.GetProperty().LightingOff()
         #  self.plane_actor_heigher.GetProperty().SetOpacity()
 
         self.structure_plot_widget.plotter.renderer.AddActor(actor)
 
     def all_planes_position(self):
-        val = self.plane_height_range_slider.getRange()
-        startVal = val[0]
-        endVal = val[1]
+        values = self.plane_height_range_slider.getRange()
         z = self.structure_plot_widget.data.z
-        #self.plane_position = startVal
-        self.planeSource.SetOrigin(-5, -5, z / 100 * startVal)
-        self.planeSource.SetPoint1(self.structure_plot_widget.data.x + 5, -5, z / 100 * startVal)
-        self.planeSource.SetPoint2(-5, self.structure_plot_widget.data.y + 5, z / 100 * startVal)
-        self.planeSource.Update()
+        for i, source in enumerate((self.planeSource, self.planeSource_heigher)):
+            if values[i] != self._plane_slider_values[i]:
+                center = list(source.GetCenter())
+                center[2] = z / 100 * values[i]
+                source.SetCenter(center)
+                source.Update()
+        self._plane_slider_values = values
+        self.planes_changed.emit()
+        self.refresh_cutoff_selection()
+        self.plotter.render()
 
-        self.planeSource_heigher.SetOrigin(-5, -5, z / 100 * endVal)
-        self.planeSource_heigher.SetPoint1(self.structure_plot_widget.data.x + 5, -5, z / 100 * endVal)
-        self.planeSource_heigher.SetPoint2(-5, self.structure_plot_widget.data.y + 5, z / 100 * endVal)
-        self.planeSource_heigher.Update()
+    def show_planes_dialog(self):
+        if self.planes_dialog is None:
+            self.planes_dialog = PlanesDialog(self)
+        self.planes_dialog.refresh()
+        self.planes_dialog.show()
+        self.planes_dialog.raise_()
+        self.planes_dialog.activateWindow()
 
-        self.structure_plot_widget.plotter.renderer.Render()
+    def _register_cutoff_plane(self, kind):
+        for plane in self.planes:
+            if plane.kind == kind:
+                return plane
+        top = kind == "top"
+        source = self.planeSource_heigher if top else self.planeSource
+        actor = (self.structure_plot_widget.plane_actor_heigher if top
+                 else self.structure_plot_widget.plane_actor)
+        plane = ScenePlane("Top plane" if top else "Bottom plane", source, actor, kind=kind)
+        self.planes.append(plane)
+        self.plotter.renderer.AddActor(actor)
+        return plane
+
+    def add_miller_plane(self, hkl):
+        number = self._plane_number + 1
+        plane = miller_plane(hkl, self.structure_plot_widget.data.unit_cell_vectors,
+                             f"Plane {number} ({' '.join(str(i) for i in hkl)})")
+        self._plane_number = number
+        self.plotter.renderer.AddActor(plane.actor)
+        self.planes.append(plane)
+        self._plane_edited(plane)
+        return plane
+
+    def remove_plane(self, plane):
+        self.planes.remove(plane)
+        self.plotter.renderer.RemoveActor(plane.actor)
+        if plane.kind:
+            checkbox = self.top_plane_cb if plane.kind == "top" else self.bottom_plane_cb
+            blocker = QtCore.QSignalBlocker(checkbox)
+            checkbox.setChecked(False)
+            del blocker
+        self._plane_edited(plane)
+
+    def set_plane_visibility(self, plane, visible):
+        if plane.kind:
+            checkbox = self.top_plane_cb if plane.kind == "top" else self.bottom_plane_cb
+            blocker = QtCore.QSignalBlocker(checkbox)
+            checkbox.setChecked(visible)
+            del blocker
+        plane.actor.SetVisibility(visible)
+        self.planes_changed.emit()
+        self.plotter.render()
+
+    def set_plane_color(self, plane, color):
+        plane.actor.GetProperty().SetColor(*color)
+        self.planes_changed.emit()
+        self.plotter.render()
+
+    def set_plane_transparency(self, plane, value):
+        plane.actor.GetProperty().SetOpacity(1.0 - value / 100.0)
+        self.planes_changed.emit()
+        self.plotter.render()
+
+    def move_plane(self, plane, displacement):
+        plane.move(displacement)
+        if plane.kind:
+            # Keep the percentage slider in step without rounding the actual geometry.
+            z = self.structure_plot_widget.data.z
+            if z:
+                values = list(self.plane_height_range_slider.getRange())
+                values[1 if plane.kind == "top" else 0] = int(round(plane.source.GetCenter()[2] / z * 100))
+                slider = self.plane_height_range_slider
+                blocker = QtCore.QSignalBlocker(slider)
+                if min(values) <= slider.min():
+                    slider.setMin(min(values) - 1)
+                if max(values) >= slider.max():
+                    slider.setMax(max(values) + 1)
+                slider.setRange(*values)
+                self._plane_slider_values = tuple(values)
+                del blocker
+        self._plane_edited(plane)
+
+    def rotate_plane(self, plane, axis, angle):
+        plane.rotate(axis, angle)
+        self._plane_edited(plane)
+
+    def _plane_edited(self, plane):
+        self.planes_changed.emit()
+        if plane.kind:
+            self.refresh_cutoff_selection()
+        self.plotter.reset_camera_clipping_range()
+        self.plotter.render()
+
+    def refresh_cutoff_selection(self):
+        self.toggle_mag_above_plane(self.mag_cb.isChecked())
+        self.toggle_constrain_above_plane(self.constrains_between_planes_cb.isChecked())
+        self.toggle_symbols_between_planes(self.numbers_between_planes_cb.isChecked())
+        if self.sphere_selected_cb.isChecked():
+            self.toggle_spheres_between_planes(True)
+        self.cutoff_planes_changed.emit()
+
+    def reset_planes(self):
+        """Rebuild cut-off planes and discard custom planes when a structure is loaded."""
+        for plane in self.planes:
+            self.plotter.renderer.RemoveActor(plane.actor)
+        self.planes.clear()
+        values = self.plane_height_range_slider.getRange()
+        for kind, source, actor, value, checkbox in (
+                ("bottom", self.planeSource, self.structure_plot_widget.plane_actor,
+                 values[0], self.bottom_plane_cb),
+                ("top", self.planeSource_heigher, self.structure_plot_widget.plane_actor_heigher,
+                 values[1], self.top_plane_cb)):
+            self._add_plane(source, actor, value)
+            actor.SetVisibility(checkbox.isChecked())
+            actor.GetProperty().SetOpacity(self.plane_opacity)
+            self._register_cutoff_plane(kind)
+        self._plane_number = 0
+        self._plane_slider_values = values
+        self.change_plane_color()
+        self.planes_changed.emit()
 
     def change_plane_color(self):
         color = self.plane_color_button.color()
@@ -913,30 +1023,37 @@ class StructureControlsWidget(QWidget):
         b = color.blue()/255
         self.structure_plot_widget.plane_actor.GetProperty().SetColor((r,g,b))
         self.structure_plot_widget.plane_actor_heigher.GetProperty().SetColor((r,g,b))
+        self.planes_changed.emit()
+        self.plotter.render()
 
     def change_plane_transparency(self, value):
         """Set a shared transparency for both cut-off planes."""
         self.plane_opacity = 1.0 - value / 100.0
         self.plane_transparency_label.setText(f"Transparency: {value}%")
         self.structure_plot_widget.plane_actor.GetProperty().SetOpacity(
-            self.plane_opacity if self.bottom_plane_cb.isChecked() else 0.0
+            self.plane_opacity
         )
         self.structure_plot_widget.plane_actor_heigher.GetProperty().SetOpacity(
-            self.plane_opacity if self.top_plane_cb.isChecked() else 0.0
+            self.plane_opacity
         )
-        self.structure_plot_widget.plotter.renderer.Render()
+        self.planes_changed.emit()
+        self.plotter.render()
 
     def toggle_plane(self, flag):
         """ switches on and off plane visibility"""
-        opacity = self.plane_opacity if flag else 0.0
-        self.structure_plot_widget.plane_actor.GetProperty().SetOpacity(opacity)
-        self.structure_plot_widget.plotter.renderer.Render()
+        self._toggle_cutoff_plane("bottom", flag)
 
     def toggle_plane_heigher(self, flag):
         """ switches on and off plane visibility"""
-        opacity = self.plane_opacity if flag else 0.0
-        self.structure_plot_widget.plane_actor_heigher.GetProperty().SetOpacity(opacity)
-        self.structure_plot_widget.plotter.renderer.Render()
+        self._toggle_cutoff_plane("top", flag)
+
+    def _toggle_cutoff_plane(self, kind, flag):
+        plane = next((p for p in self.planes if p.kind == kind), None)
+        if plane is None and flag:
+            plane = self._register_cutoff_plane(kind)
+            self.refresh_cutoff_selection()
+        if plane is not None:
+            self.set_plane_visibility(plane, bool(flag))
 
     def toggle_all_constrains(self, flag):
         """ switches on and off constrains visibility"""
@@ -954,6 +1071,8 @@ class StructureControlsWidget(QWidget):
         self.structure_plot_widget.plotter.renderer.RemoveActor(self.structure_plot_widget.constrain_actor)
         if self.constrains_between_planes_cb.isChecked():
             indices, coordinates = self.find_indices_between_planes()
+            if not indices:
+                return
             coords = []
             constr = []
             for i in range(len(indices)):
@@ -968,6 +1087,8 @@ class StructureControlsWidget(QWidget):
         if self.mag_cb.isChecked():
             #self.end_geometry()
             indices, coordinates = self.find_indices_between_planes()
+            if not indices:
+                return
             coords = []
             magnet = []
             outcar_data = getattr(self.structure_plot_widget.data, "outcar_data", None)
@@ -995,11 +1116,10 @@ class StructureControlsWidget(QWidget):
             self.structure_plot_widget.symb_actor.SetVisibility(flag)
 
     def find_indices_between_planes(self):
-        slidervalue = self.plane_height_range_slider.getRange()
-        height = slidervalue[0] / 100 * self.structure_plot_widget.data.z
-        end = slidervalue[1] / 100 * self.structure_plot_widget.data.z
         indices = []
         global_coordinates = np.array(self.structure_plot_widget.data.outcar_coordinates[self.geometry_slider.value()])
+        if not len(global_coordinates):
+            return [], global_coordinates
         if self.selected_actors != []:
             coordinates = []
             for actor in self.selected_actors:
@@ -1012,7 +1132,13 @@ class StructureControlsWidget(QWidget):
                         indices.append(index)
         else:
 
-            indice = np.where((global_coordinates[:, 2] > height) & (global_coordinates[:, 2] < end))[0]
+            mask = np.ones(len(global_coordinates), dtype=bool)
+            for plane in self.planes:
+                if plane.kind:
+                    distances = ((global_coordinates - plane.source.GetCenter())
+                                 @ np.asarray(plane.source.GetNormal()))
+                    mask &= distances > 0 if plane.kind == "bottom" else distances < 0
+            indice = np.flatnonzero(mask)
             indices = indice.tolist()
         return indices, global_coordinates
 
@@ -1022,6 +1148,8 @@ class StructureControlsWidget(QWidget):
             coords = []
             symb = []
             indices, coordinates = self.find_indices_between_planes()
+            if not indices:
+                return
             for i in range(len(indices)):
                 coords.append(list(coordinates[indices[i]]))
                 symb.append(self.structure_plot_widget.data.atoms_symb_and_num[indices[i]])
@@ -1408,5 +1536,3 @@ class MoveableScatterPlotItem(pg.ScatterPlotItem):
     """
     def __init__(self,*args, **kwargs):
         super().__init__(*args, **kwargs)
-
-
